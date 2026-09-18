@@ -15,6 +15,7 @@
   "benchmark_artifact_path": "artifacts/reference/reference_benchmark.jsonl",
   "environment_manifest_path": "artifacts/reference/environment.json",
   "precision": ["fp32", "bf16"],
+  "training_stages": ["head-warmup", "brief-full-adaptation"],
   "parameter_count": 600000000,
   "head_bias": true,
   "output": "artifacts/reference/reference_manifest.json"
