@@ -251,7 +251,7 @@ class FlatReferenceBackend:
         dtype: torch.dtype | None = None,
         head_bias: bool = True,
         add_bos: bool = True,
-    ) -> "FlatReferenceBackend":
+    ) -> FlatReferenceBackend:
         """Load a reproducible reference backbone and trained scalar decision head.
 
         ``revision`` is required rather than silently tracking a mutable default branch.
