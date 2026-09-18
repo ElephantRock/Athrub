@@ -205,6 +205,16 @@ A2 can nominate an architecture for A3 only when all of the following hold:
 
 A compatibility architecture that is faster but loses unacceptable quality does not pass. A high-quality architecture with no meaningful computational advantage remains useful research evidence but does not justify A3 as the Athrub scaling path.
 
+## Future research sidecar — semantic-state enrichment
+
+A separate future hypothesis asks whether Athrub's trainable shared representation can be **augmented by an independently computed semantic state**, rather than only reused or scored more efficiently.
+
+This is intentionally outside the A2 architecture comparison and outside the A2 go/no-go gate. It changes the information available to the receiver and therefore may change the probability distribution by design. It must never be treated as an A1 equivalence mechanism or as evidence that repeated context computation was removed.
+
+The earliest meaningful reassessment is after A2 has established a trainable shared decision representation. A bounded later experiment would compare receiver-only, text-mediated adviser, and semantic-state adviser paths while accounting for total-system quality, calibration, FLOPs, latency, throughput, VRAM, model residency, and negative transfer.
+
+The public Athrub research boundary is specified in `docs/SEMANTIC_STATE_ENRICHMENT.md`.
+
 ## Non-goals
 
 A2 does not attempt to:
@@ -213,10 +223,11 @@ A2 does not attempt to:
 - claim cross-domain generality;
 - add production policy thresholds or escalation logic;
 - introduce domain-specific adapters as the main architecture;
+- add cross-model semantic-state enrichment as an A2 architecture arm;
 - claim production value from offline results;
 - import external project terminology into Athrub architecture.
 
-Those questions remain assigned to later gates.
+Those questions remain assigned to later gates or non-binding research sidecars.
 
 ## Architecture register linkage
 
@@ -227,3 +238,5 @@ A2 is the first intended research surface for these candidate patterns:
 - APR-032 — Bounded Candidate Compatibility Scoring.
 
 Their presence in the register or this specification means they are eligible for controlled comparison after A1. It does not mean any of them is already adopted, implemented, or verified.
+
+Semantic-state enrichment remains a separate research-only hypothesis. Its documentation does not add an A2 arm, change the A2 exit gate, or create implementation authority.
