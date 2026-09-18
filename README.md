@@ -44,7 +44,7 @@ Primary deliverables:
 
 Success requires preserving decision quality while materially reducing repeated computation for multi-candidate workloads.
 
-A1 deliberately preserves candidate continuation semantics. Runtime candidate encoders, candidate-compatibility heads, late-interaction redesigns, semantic-state enrichment, and offline objective compilation are excluded until the A1 equivalence/efficiency gate is passed.
+A1 deliberately preserves candidate continuation semantics. Runtime candidate encoders, candidate-compatibility heads, late-interaction redesigns, indexed candidate-slot readout, semantic-state enrichment, and offline objective compilation are excluded until the A1 equivalence/efficiency gate is passed.
 
 ## A2: Trainable Shared Architecture
 
@@ -54,15 +54,22 @@ The A2 specification compares:
 
 - trainable shared continuation as the control;
 - independent context/candidate encoding with lightweight compatibility scoring;
-- independent encoding with a small late-interaction/refinement stage.
+- independent encoding with a small late-interaction/refinement stage;
+- indexed candidate-slot readout using reversible request-local candidate-to-symbol or candidate-to-index mappings.
 
-Every A2 arm still returns one aligned logit per supplied candidate and applies request-local softmax over exactly that candidate set. The detailed research contract is in `docs/A2_TRAINABLE_ARCHITECTURE.md`.
+Every A2 arm still returns one aligned logit per supplied candidate and applies request-local softmax over exactly that candidate set. The indexed-readout arm must demonstrate semantic remap invariance: changing temporary output symbols or indices must not change the inverse-mapped semantic distribution beyond the declared numerical/quality envelope.
+
+If an indexed readout selects legal candidate logits from a broader output space, the retained legal-candidate mass and out-of-set mass remain explicit evidence rather than being hidden by conditional renormalization. Agreement or dispersion across repeated stochastic reads is a stability diagnostic, not calibration by itself.
+
+Indexed readout may remove candidate continuations without making heavy context candidate-independent. If changing only the candidate set changes the heavy context representation, that mechanism does not satisfy independent context reuse.
+
+The detailed research contract is in `docs/A2_TRAINABLE_ARCHITECTURE.md`.
 
 ## Future research sidecar: semantic-state enrichment
 
 A separate, non-gating research hypothesis asks whether a validated Athrub shared decision representation could later be enriched by an independently computed semantic state.
 
-This is not an A1 optimization and not a fourth A2 architecture arm. Unlike shared-prefix reuse, enrichment intentionally introduces additional information and may change the decision distribution. It can only be assessed after the shared architecture is established, and any claim must account for the complete system rather than only the receiver model.
+This is not an A1 optimization and not an A2 architecture arm. Unlike shared-prefix reuse, enrichment intentionally introduces additional information and may change the decision distribution. It can only be assessed after the shared architecture is established, and any claim must account for the complete system rather than only the receiver model.
 
 The research boundary, controls, failure model, and full-system efficiency requirements are specified in `docs/SEMANTIC_STATE_ENRICHMENT.md`.
 
@@ -133,9 +140,10 @@ Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, `docs/A2
 4. Treat calibration, numerical stability, and out-of-distribution behavior as first-class properties.
 5. Record code, substrate, tokenizer, head, hardware, precision, configuration, and environment identity for every canonical benchmark.
 6. Keep external research identity in private provenance; keep Athrub public architecture vocabulary independent.
-7. Treat runtime candidate representation and compatibility scoring as post-A1 hypotheses until controlled A2 evidence exists.
-8. Treat semantic-state enrichment as post-A2 research unless an explicit Athrub decision promotes a bounded trial; count adviser compute, memory, latency, and negative transfer as part of the system claim.
-9. Treat offline objective compilation as post-A2 research unless a measured quality/scale/transfer/serving-cost pressure exists; separate student utility from teacher equivalence and serving cost from offline synthesis/training cost.
+7. Treat runtime candidate representation, compatibility scoring, and indexed candidate-slot readout as post-A1 hypotheses until controlled A2 evidence exists.
+8. For indexed readout, keep conditional legal-set renormalization separate from legal-candidate mass and keep stochastic reread stability separate from calibration.
+9. Treat semantic-state enrichment as post-A2 research unless an explicit Athrub decision promotes a bounded trial; count adviser compute, memory, latency, and negative transfer as part of the system claim.
+10. Treat offline objective compilation as post-A2 research unless a measured quality/scale/transfer/serving-cost pressure exists; separate student utility from teacher equivalence and serving cost from offline synthesis/training cost.
 
 ## Status
 
