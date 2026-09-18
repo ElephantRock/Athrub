@@ -55,7 +55,7 @@ def _benchmark_shape(
         "candidate_token_counts": result.metadata.get("candidate_token_counts"),
         "path_token_counts": result.metadata.get("path_token_counts"),
         "flat_logical_token_positions": result.metadata.get("flat_logical_token_positions"),
-        "model_revision": result.metadata.get("model_revision"),
+        "substrate_revision": result.metadata.get("substrate_revision"),
         "tokenizer_revision": result.metadata.get("tokenizer_revision"),
         "precision": result.metadata.get("precision"),
     }
