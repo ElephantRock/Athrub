@@ -44,6 +44,20 @@ Primary deliverables:
 
 Success requires preserving decision quality while materially reducing repeated computation for multi-candidate workloads.
 
+A1 deliberately preserves candidate continuation semantics. Runtime candidate encoders, candidate-compatibility heads, and late-interaction redesigns are excluded until the A1 equivalence/efficiency gate is passed.
+
+## A2: Trainable Shared Architecture
+
+After A1 succeeds, Athrub will test whether candidate-specific Transformer continuation itself can be reduced or removed while preserving the same bounded probability contract.
+
+The A2 specification compares:
+
+- trainable shared continuation as the control;
+- independent context/candidate encoding with lightweight compatibility scoring;
+- independent encoding with a small late-interaction/refinement stage.
+
+Every A2 arm still returns one aligned logit per supplied candidate and applies request-local softmax over exactly that candidate set. The detailed research contract is in `docs/A2_TRAINABLE_ARCHITECTURE.md`.
+
 ## Core decision contract
 
 Athrub models bounded probabilistic decisions of the form:
@@ -93,6 +107,8 @@ schemas/                    Machine-readable artifact contracts
 tests/                      Numerical and contract tests
 ```
 
+Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, and `docs/A2_TRAINABLE_ARCHITECTURE.md`. Architecture-pattern research remains non-binding until linked through an explicit roadmap/specification decision.
+
 ## Research principles
 
 1. Change one variable at a time.
@@ -101,6 +117,7 @@ tests/                      Numerical and contract tests
 4. Treat calibration, numerical stability, and out-of-distribution behavior as first-class properties.
 5. Record code, substrate, tokenizer, head, hardware, precision, configuration, and environment identity for every canonical benchmark.
 6. Keep external research identity in private provenance; keep Athrub public architecture vocabulary independent.
+7. Treat runtime candidate representation and compatibility scoring as post-A1 hypotheses until controlled A2 evidence exists.
 
 ## Status
 
