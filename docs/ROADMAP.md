@@ -27,17 +27,22 @@ Exit condition: numerical equivalence plus a material efficiency gain on represe
 
 Goal: train shared computation end to end and test whether full candidate-specific Transformer continuation is still necessary once a reusable shared decision representation exists.
 
-A2 begins only after the A1 go gate passes. It compares three controlled architecture families under the same bounded probability contract:
+A2 begins only after the A1 go gate passes. It compares four controlled architecture families under the same bounded probability contract:
 
 1. **Trainable shared continuation** — the trainable form of the A1 decomposition and the primary control.
 2. **Independent context/candidate encoding + lightweight compatibility scoring** — context and candidate representations are produced separately, then one aligned logit is produced per candidate.
 3. **Independent encoding + late interaction** — the same separation with a small bounded interaction/refinement stage before scoring.
+4. **Indexed candidate-slot readout** — request-local semantic candidates are reversibly mapped to temporary output symbols or typed indices, one or more fixed decision positions produce aligned candidate scores, and the mapping is inverted before request-local normalization.
 
 Every arm must return one logit per supplied candidate and normalize over exactly the candidates in that request. Runtime candidate semantics may be explored, but independent sigmoid scores do not replace the current mutually exclusive Athrub probability distribution.
 
+For indexed readout, temporary symbols are request-local indirection rather than hidden global semantic classes. The same semantic candidate set must be tested under multiple symbol/index mappings. If candidate scores are extracted from a broader output space, legal-candidate mass and out-of-set mass remain separate from the conditional candidate softmax. Agreement or dispersion across repeated stochastic reads is stability evidence, not calibration by itself.
+
+Indexed readout may remove candidate continuations while still using candidate-dependent heavy context. If changing only the candidate set changes the heavy context representation, that implementation is not evidence of candidate-independent context reuse.
+
 Detailed experiment contract: `docs/A2_TRAINABLE_ARCHITECTURE.md`.
 
-Exit condition: <1 percentage point absolute quality loss against the reference target, preserved probability semantics and acceptable calibration, plus a substantial measured compute/latency/throughput/memory advantage in a representative multi-candidate regime.
+Exit condition: <1 percentage point absolute quality loss against the reference target, preserved probability semantics and acceptable calibration, plus a substantial measured compute/latency/throughput/memory advantage in a representative multi-candidate regime. An indexed-readout nominee must additionally pass semantic remap invariance and legal-set-mass reporting where applicable.
 
 ## A3 — Architecture scaling
 
