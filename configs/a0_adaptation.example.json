@@ -6,6 +6,7 @@
   "tokenizer_revision": null,
   "output_dir": "artifacts/a0-reference-v0.1",
   "seed": 1729,
+  "device": "cuda",
   "precision": "bf16",
   "candidate_count_train_min": 2,
   "candidate_count_train_max": 16,
@@ -16,17 +17,21 @@
   },
   "head_warmup": {
     "enabled": true,
-    "max_steps": 10000,
+    "epochs": 1,
+    "batch_size": 8,
     "learning_rate": 0.001,
     "weight_decay": 0.0
   },
   "brief_full_adaptation": {
     "enabled": true,
     "epochs": 1,
+    "batch_size": 4,
     "learning_rate": 0.00001,
     "weight_decay": 0.01
   },
   "data": {
+    "train_jsonl": "PRIVATE_OR_LOCAL_TRAIN_JSONL",
+    "validation_jsonl": "PRIVATE_OR_LOCAL_VALIDATION_JSONL",
     "manifest": "PRIVATE_OR_LOCAL_DATA_MANIFEST",
     "target_examples_min": 50000,
     "target_examples_max": 200000,
@@ -34,6 +39,10 @@
       "programmatically-verifiable",
       "labeled-bounded-decision"
     ]
+  },
+  "warmup_gate": {
+    "require_accuracy_above_uniform": true,
+    "minimum_accuracy_margin": 0.02
   },
   "freeze": {
     "emit_reference_manifest": true,
