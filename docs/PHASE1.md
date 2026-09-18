@@ -10,7 +10,7 @@ The A0 reference substrate is an experimental dependency rather than Athrub arch
 
 Can Athrub encode common decision context once, reuse that computation across candidate evaluations, and preserve the resulting probability distribution?
 
-Phase 1 deliberately changes inference computation before changing model weights, datasets, or training objectives.
+Phase 1 deliberately changes inference computation before changing model weights, datasets, training objectives, candidate representation, or scoring topology.
 
 ## Hypothesis
 
@@ -40,6 +40,8 @@ Phase 1 compares four execution paths:
 4. **Shared packed** — shared prefix state plus packed/batched candidate continuation.
 
 Implementation 2 is a required control: ordinary packing improvements must not be misattributed to shared computation.
+
+Candidate-compatibility scoring, independent candidate encoders, runtime label representations, and late cross-attention/refinement are deliberately excluded from these four paths. They are A2 research variables and would confound A1 attribution.
 
 ## Workload matrix
 
@@ -142,11 +144,16 @@ Proceed to trainable shared computation when all of the following hold:
 
 If theoretical work falls dramatically while wall-clock improvement remains small, the next investigation is kernel/memory-layout optimization rather than an immediate claim of architectural speedup.
 
+Only after this gate passes may A2 test whether candidate continuation itself can be replaced by a trainable compatibility mechanism under the same bounded probability contract.
+
 ## Non-goals
 
 Phase 1 does not attempt to:
 
 - train a new general model
+- replace candidate continuation with compatibility scoring
+- introduce independent candidate encoders or candidate-conditioned late-interaction heads
+- introduce runtime candidate-label semantics as a new trainable architecture
 - reduce parameter count
 - introduce new reinforcement-learning objectives
 - claim domain generality
