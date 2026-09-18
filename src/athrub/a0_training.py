@@ -287,7 +287,12 @@ def set_substrate_trainable(model: nn.Module, trainable: bool) -> None:
 
 
 def trainable_parameter_count(*modules: nn.Module) -> int:
-    return sum(parameter.numel() for module in modules for parameter in module.parameters() if parameter.requires_grad)
+    return sum(
+        parameter.numel()
+        for module in modules
+        for parameter in module.parameters()
+        if parameter.requires_grad
+    )
 
 
 def run_decision_epoch(
@@ -315,7 +320,8 @@ def run_decision_epoch(
         raise ValueError("examples must not be empty")
 
     training = optimizer is not None
-    model.train(training)
+    substrate_training = training and any(parameter.requires_grad for parameter in model.parameters())
+    model.train(substrate_training)
     head.train(training)
     rows: list[DecisionMetrics] = []
 
