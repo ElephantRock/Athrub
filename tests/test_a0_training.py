@@ -13,6 +13,7 @@ from athrub.a0_training import (
     DecisionTrainingExample,
     decision_logits,
     decision_loss,
+    evaluate_by_family,
     example_from_mapping,
     load_decision_jsonl,
     metrics_from_logits,
@@ -63,6 +64,7 @@ def examples() -> list[DecisionTrainingExample]:
             question="Which action reduces temperature?",
             candidates=("cool", "heat"),
             target_distribution=(1.0, 0.0),
+            task_family="control",
         ),
         DecisionTrainingExample(
             request_id="b",
@@ -70,6 +72,7 @@ def examples() -> list[DecisionTrainingExample]:
             question="What should happen next?",
             candidates=("retry", "delete", "ignore"),
             target_distribution=(1.0, 0.0, 0.0),
+            task_family="operations",
         ),
     ]
 
@@ -82,6 +85,7 @@ def test_mapping_accepts_hard_label_and_soft_distribution() -> None:
             "question": "q",
             "candidates": ["a", "b", "c"],
             "label": 1,
+            "task_family": "hard-family",
         }
     )
     soft = example_from_mapping(
@@ -94,7 +98,9 @@ def test_mapping_accepts_hard_label_and_soft_distribution() -> None:
     )
 
     assert hard.target_distribution == (0.0, 1.0, 0.0)
+    assert hard.task_family == "hard-family"
     assert soft.target_distribution == (0.75, 0.25)
+    assert soft.task_family is None
 
 
 def test_mapping_rejects_ambiguous_supervision() -> None:
@@ -173,6 +179,7 @@ def test_head_warmup_changes_head_but_not_frozen_substrate() -> None:
     )
 
     assert metrics.examples == 2
+    assert model.training is False
     assert all(
         torch.equal(before, after.detach())
         for before, after in zip(before_model, model.parameters(), strict=True)
@@ -194,3 +201,22 @@ def test_decision_logits_preserve_request_grouping() -> None:
     assert len(logits) == 2
     assert logits[0].shape == (2,)
     assert logits[1].shape == (3,)
+
+
+def test_family_evaluation_reports_each_family() -> None:
+    torch.manual_seed(13)
+    model = TinyTrainableModel()
+    head = ScalarDecisionHead(4)
+
+    metrics = evaluate_by_family(
+        model=model,
+        head=head,
+        tokenizer=FakeTokenizer(),
+        examples=examples(),
+        batch_size=2,
+        device="cpu",
+    )
+
+    assert set(metrics) == {"control", "operations"}
+    assert metrics["control"].examples == 1
+    assert metrics["operations"].examples == 1
