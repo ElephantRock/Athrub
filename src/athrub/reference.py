@@ -3,6 +3,9 @@
 The reference backend deliberately recomputes the shared context for every candidate.
 Phase 1 optimized backends must preserve its candidate ordering, logits, and probability
 semantics while changing only the execution strategy.
+
+The pretrained causal model used to establish A0 is a replaceable reference substrate,
+not Athrub architecture identity.
 """
 
 from __future__ import annotations
@@ -84,7 +87,7 @@ class FlatReferenceBackend:
         dtype: torch.dtype | None = None,
         codec: TextDecisionCodec | None = None,
         add_bos: bool = True,
-        model_revision: str | None = None,
+        substrate_revision: str | None = None,
         tokenizer_revision: str | None = None,
         name: str = "athrub-reference-flat",
     ) -> None:
@@ -93,7 +96,7 @@ class FlatReferenceBackend:
         self.head = head
         self.codec = codec or TextDecisionCodec()
         self.add_bos = add_bos
-        self.model_revision = model_revision
+        self.substrate_revision = substrate_revision
         self.tokenizer_revision = tokenizer_revision
         self._name = name
 
@@ -230,7 +233,7 @@ class FlatReferenceBackend:
                         "candidate_token_counts": candidate_counts,
                         "path_token_counts": path_counts,
                         "flat_logical_token_positions": sum(path_counts),
-                        "model_revision": self.model_revision,
+                        "substrate_revision": self.substrate_revision,
                         "tokenizer_revision": self.tokenizer_revision,
                         "precision": precision,
                     },
@@ -242,9 +245,9 @@ class FlatReferenceBackend:
     def from_pretrained(
         cls,
         *,
-        model_id: str,
+        substrate_id: str,
         head_path: str | Path,
-        revision: str,
+        substrate_revision: str,
         tokenizer_id: str | None = None,
         tokenizer_revision: str | None = None,
         device: str | torch.device | None = None,
@@ -252,11 +255,13 @@ class FlatReferenceBackend:
         head_bias: bool = True,
         add_bos: bool = True,
     ) -> FlatReferenceBackend:
-        """Load a reproducible reference backbone and trained scalar decision head.
+        """Load a reproducible reference substrate and trained scalar decision head.
 
-        ``revision`` is required rather than silently tracking a mutable default branch.
-        ``head_path`` must contain a PyTorch state dict for :class:`ScalarDecisionHead`.
-        The optional ``reference`` dependency group installs the model loader.
+        ``substrate_revision`` is required rather than silently tracking a mutable
+        default ref. ``head_path`` must contain a PyTorch state dict for
+        :class:`ScalarDecisionHead`. Identity-bearing substrate acquisition details
+        should be supplied from private/local configuration rather than committed into
+        Athrub architecture documentation.
         """
 
         try:
@@ -266,15 +271,15 @@ class FlatReferenceBackend:
                 "from_pretrained requires the 'reference' optional dependency"
             ) from exc
 
-        tokenizer_source = tokenizer_id or model_id
-        tokenizer_revision = tokenizer_revision or revision
+        tokenizer_source = tokenizer_id or substrate_id
+        tokenizer_revision = tokenizer_revision or substrate_revision
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_source,
             revision=tokenizer_revision,
         )
         model = AutoModel.from_pretrained(
-            model_id,
-            revision=revision,
+            substrate_id,
+            revision=substrate_revision,
             torch_dtype=dtype,
         )
 
@@ -282,7 +287,7 @@ class FlatReferenceBackend:
         if hidden_size is None:
             hidden_size = getattr(model.config, "n_embd", None)
         if hidden_size is None:
-            raise ValueError("unable to infer backbone hidden size")
+            raise ValueError("unable to infer reference-substrate hidden size")
 
         head = ScalarDecisionHead(int(hidden_size), bias=head_bias)
         state_dict = torch.load(Path(head_path), map_location="cpu", weights_only=True)
@@ -297,6 +302,6 @@ class FlatReferenceBackend:
             device=device,
             dtype=dtype,
             add_bos=add_bos,
-            model_revision=revision,
+            substrate_revision=substrate_revision,
             tokenizer_revision=tokenizer_revision,
         )
