@@ -14,14 +14,14 @@ The output remains one aligned logit per supplied candidate followed by normaliz
 
 ## Research question
 
-Can Athrub train a reusable shared decision representation end to end and reduce candidate-specific computation further by replacing full candidate continuation with bounded candidate-compatibility scoring, without materially degrading decision quality or calibration?
+Can Athrub train a reusable shared decision representation end to end and reduce candidate-specific computation further by replacing full candidate continuation with bounded candidate-scoring or candidate-readout mechanisms, without materially degrading decision quality or calibration?
 
 A2 therefore asks two progressively stronger questions:
 
 1. Can the A1 shared-computation decomposition be trained end to end?
 2. Once shared context exists, is full Transformer continuation for every candidate still necessary?
 
-The second question is subordinate to the first. Candidate-compatibility mechanisms must not be used to retroactively justify A1.
+The second question is subordinate to the first. Candidate-compatibility or indexed-readout mechanisms must not be used to retroactively justify A1.
 
 ## Fixed semantics
 
@@ -39,13 +39,15 @@ Requirements:
 - logits from different requests are never normalized together;
 - duplicate textual candidates at different positions retain distinct candidate identities;
 - complete logits and probabilities are retained for evaluation;
-- independent sigmoid/confidence outputs are not a substitute for the current mutually exclusive Athrub probability distribution.
+- independent sigmoid/confidence outputs are not a substitute for the current mutually exclusive Athrub probability distribution;
+- if candidate logits are extracted from a broader output space, retained legal-candidate mass and out-of-set mass are reported separately from the conditional candidate softmax;
+- agreement, standard error, or dispersion across repeated stochastic reads is treated as sampling-stability evidence unless independent calibration evaluation establishes more.
 
 Any future multilabel task requires a separately declared decision contract rather than a silent change to this one.
 
 ## A2 architecture arms
 
-A2 compares at least three trainable arms under matched data, evaluation, parameter-accounting, and deployment conditions.
+A2 compares at least four trainable arms under matched data, evaluation, parameter-accounting, and deployment conditions.
 
 ### A2-A — Trainable shared continuation control
 
@@ -63,7 +65,7 @@ p = softmax(z)
 Purpose:
 
 - establish the trainable version of the A1 mechanism;
-- provide the control needed to attribute any later gain to compatibility scoring rather than to training alone.
+- provide the control needed to attribute any later gain to a new candidate-scoring/readout mechanism rather than to training alone.
 
 ### A2-B — Independent context/candidate encoding with lightweight scoring
 
@@ -94,20 +96,59 @@ p = softmax(z)
 
 Candidate late interaction may use a small number of cross-attention or equivalent refinement layers. Complexity must remain explicitly measured; a late interaction module that recreates full candidate re-encoding does not satisfy the intended decomposition.
 
+### A2-D — Indexed candidate-slot readout
+
+Map each request-local semantic candidate to a temporary output symbol or typed index, obtain aligned scores from one or more fixed decision positions, then invert the mapping before request-local normalization.
+
+Conceptually:
+
+```text
+semantic candidates: c_1 ... c_K
+        ↓ request-local reversible map
+symbols / typed indices: s_1 ... s_K
+        ↓
+shared decision computation
+        ↓
+fixed decision slot h
+        ↓
+score(s_1 ... s_K)
+        ↓ inverse map
+z(c_1) ... z(c_K)
+        ↓
+p = softmax(z)
+```
+
+This arm tests whether K candidate continuations can be replaced by a bounded readout whose candidate meanings remain supplied at runtime.
+
+Requirements specific to this arm:
+
+- the candidate-to-symbol/index mapping is request-local and reversible;
+- semantic probabilities are compared after inverse mapping, never by temporary symbol identity;
+- the same semantic candidate set is tested under multiple symbol/index permutations to detect output-symbol priors;
+- candidate ordering is reconstructed exactly after any packing, slot grouping, or execution reordering;
+- when scores originate in a broader output space, legal-candidate mass remains visible rather than being hidden by renormalization;
+- repeated stochastic reads, if used, are evaluated as a separate stability mechanism rather than as calibration by definition;
+- fixed-slot layout, iteration/step count, and any intermediate free-form reasoning are explicit experimental variables.
+
+If candidate descriptions participate in the heavy context computation, changing the candidate set changes that context representation. Such an implementation may still remove candidate continuations, but it is not evidence of candidate-independent context reuse.
+
 ## Runtime candidate representation
 
 A2 may treat candidate semantics as runtime model input instead of binding every candidate to a fixed learned output index.
 
-This can support changing candidate vocabularies without changing the classifier head, but candidate wording becomes part of the effective input contract. Evaluation must therefore measure:
+This can support changing candidate vocabularies without changing the classifier head, but candidate wording becomes part of the effective input contract. Temporary output symbols used by A2-D are request-local indirection only and must not become hidden global semantic classes.
+
+Evaluation must therefore measure:
 
 - candidate paraphrase sensitivity;
 - synonymous or near-duplicate candidates;
 - seen versus unseen candidate descriptions;
 - candidate ordering invariance where semantics permit it;
+- temporary-symbol/index remap invariance for indexed readout;
 - large candidate-set behavior;
 - calibration as candidate count and wording change.
 
-Candidate text or typed candidate encodings must remain versioned with benchmark artifacts.
+Candidate text, typed candidate encodings, symbol mappings, and relevant readout layout must remain versioned with benchmark artifacts.
 
 ## Experimental controls
 
@@ -126,6 +167,14 @@ For each architecture arm hold constant where applicable:
 - benchmark shape population;
 - evaluation metrics.
 
+For indexed candidate-slot readout, also record and hold fixed for primary comparisons:
+
+- temporary-symbol/index mapping policy;
+- decision-slot serialization/layout;
+- readout width or equivalent bounded output shape;
+- iteration/step count;
+- stochastic read count and seed policy where repeated reads are used.
+
 Do not simultaneously reduce model size during the primary A2 comparison. Parameter reduction belongs to A3 after the architecture question is resolved.
 
 ## Quality and calibration metrics
@@ -138,7 +187,10 @@ Measure at minimum:
 - Brier score where applicable;
 - expected calibration error or a documented alternative;
 - complete probability-vector comparison on shared supported cases;
-- per-domain and per-candidate-count breakdowns where the dataset permits them.
+- per-domain and per-candidate-count breakdowns where the dataset permits them;
+- semantic-candidate remap/permutation invariance for indexed readout;
+- legal-candidate mass and out-of-set mass when candidate logits are selected from a broader output space;
+- repeated-read agreement/dispersion separately from calibration when stochastic reads are used.
 
 A2 is allowed to learn different probabilities from A1 because it is a newly trained architecture. It is not allowed to change what the probabilities mean.
 
@@ -156,9 +208,11 @@ Record separately:
 - context-encoder time;
 - candidate-encoder time;
 - compatibility/late-interaction time;
+- indexed decision-readout time where applicable;
+- readout-layout width and iteration/step cost where applicable;
 - cache construction and materialization cost where applicable.
 
-A theoretical change from candidate continuation to compatibility scoring is not itself a measured speedup.
+A theoretical change from candidate continuation to compatibility scoring or indexed readout is not itself a measured speedup.
 
 ## Scaling matrix
 
@@ -170,15 +224,20 @@ K = 2, 4, 8, 16, 32, 64, 128, 255
 
 Retain representative context lengths from A1 and add explicit candidate-length sweeps.
 
+For indexed candidate-slot readout, also characterize decision-layout width, the number of bounded questions/slots sharing one heavy computation, and any threshold at which the layout must split into multiple reads.
+
 Primary analysis should identify when cost is dominated by:
 
 - shared context encoding;
 - candidate encoding;
 - late interaction;
+- indexed decision readout;
 - normalization/packing overhead;
 - memory movement.
 
 For independent encoding, separately test reuse across multiple candidate sets for one fixed context.
+
+For indexed readout whose candidate descriptions participate in the heavy context, do not count the context representation as reusable across candidate-set changes.
 
 ## Candidate-cache validity
 
@@ -202,8 +261,9 @@ A2 can nominate an architecture for A3 only when all of the following hold:
 5. The selected architecture demonstrates a substantial measured compute, throughput, latency, or memory advantage in at least one target multi-candidate regime without hiding offsetting costs.
 6. Candidate-count and context-length scaling are characterized rather than inferred from one favorable shape.
 7. All primary evidence is reproducible from immutable provenance.
+8. An indexed-readout nominee additionally passes semantic symbol/index remap invariance and, when operating in a broader output space, reports legal-set mass separately from the conditional candidate distribution.
 
-A compatibility architecture that is faster but loses unacceptable quality does not pass. A high-quality architecture with no meaningful computational advantage remains useful research evidence but does not justify A3 as the Athrub scaling path.
+A compatibility or indexed-readout architecture that is faster but loses unacceptable quality does not pass. A high-quality architecture with no meaningful computational advantage remains useful research evidence but does not justify A3 as the Athrub scaling path.
 
 ## Future research sidecar — semantic-state enrichment
 
@@ -235,6 +295,8 @@ A2 does not attempt to:
 - introduce domain-specific adapters as the main architecture;
 - add cross-model semantic-state enrichment as an A2 architecture arm;
 - use teacher/search/reward-generated supervision to alter the primary A2 comparison;
+- treat legal-label renormalization from a broader output space as proof of native bounded calibration;
+- treat repeated stochastic-read agreement or standard error as calibrated confidence without independent calibration evidence;
 - claim production value from offline results;
 - import external project terminology into Athrub architecture.
 
@@ -246,7 +308,8 @@ A2 is the first intended research surface for these candidate patterns:
 
 - APR-030 — Runtime Candidate Representation;
 - APR-031 — Independent Context and Candidate Encoding;
-- APR-032 — Bounded Candidate Compatibility Scoring.
+- APR-032 — Bounded Candidate Compatibility Scoring;
+- APR-035 — Indexed Candidate-Slot Readout.
 
 Their presence in the register or this specification means they are eligible for controlled comparison after A1. It does not mean any of them is already adopted, implemented, or verified.
 
