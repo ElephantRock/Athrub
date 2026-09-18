@@ -15,6 +15,7 @@ import torch
 
 from athrub.a0_training import (
     DecisionTrainingExample,
+    evaluate_by_family,
     load_decision_jsonl,
     run_decision_epoch,
     set_substrate_trainable,
@@ -270,6 +271,17 @@ def main() -> None:
         )
         executed_stages.append("brief-full-adaptation")
 
+    final_stage = full if "brief-full-adaptation" in executed_stages else warmup
+    per_family = evaluate_by_family(
+        model=model,
+        head=head,
+        tokenizer=tokenizer,  # type: ignore[arg-type]
+        examples=validation_examples,
+        batch_size=int(final_stage.get("batch_size", 8)),
+        device=device,
+        codec=TextDecisionCodec(),
+    )
+
     if gradient_checkpointing_enabled:
         disable_checkpointing = getattr(model, "gradient_checkpointing_disable", None)
         if callable(disable_checkpointing):
@@ -305,6 +317,9 @@ def main() -> None:
         "warmup_gate_passed": warmup_gate_passed,
         "full_adaptation_requested": full_requested,
         "executed_stages": executed_stages,
+        "validation_by_family": {
+            family: asdict(metrics) for family, metrics in per_family.items()
+        },
         "output_dir": str(output_dir),
     }
     (output_dir / "training_summary.json").write_text(
