@@ -192,6 +192,11 @@ def main() -> None:
     dtype = _configured_dtype(config)
     model, tokenizer = _load_reference_substrate(config)
     model.to(device=device, dtype=dtype)
+    model_config = getattr(model, "config", None)
+    original_use_cache = getattr(model_config, "use_cache", None)
+    if model_config is not None and original_use_cache is not None:
+        model_config.use_cache = False
+
     head_config = dict(config.get("head", {}))
     head = ScalarDecisionHead(
         _hidden_size(model),
@@ -238,7 +243,15 @@ def main() -> None:
 
     full = dict(config["brief_full_adaptation"])
     full_requested = bool(full.get("enabled", True))
+    gradient_checkpointing_enabled = False
     if full_requested and warmup_gate_passed:
+        if bool(full.get("gradient_checkpointing", False)):
+            enable_checkpointing = getattr(model, "gradient_checkpointing_enable", None)
+            if not callable(enable_checkpointing):
+                raise TypeError("gradient checkpointing was requested but is unsupported")
+            enable_checkpointing()
+            gradient_checkpointing_enabled = True
+
         set_substrate_trainable(model, True)
         for parameter in head.parameters():
             parameter.requires_grad_(True)
@@ -256,6 +269,13 @@ def main() -> None:
             )
         )
         executed_stages.append("brief-full-adaptation")
+
+    if gradient_checkpointing_enabled:
+        disable_checkpointing = getattr(model, "gradient_checkpointing_disable", None)
+        if callable(disable_checkpointing):
+            disable_checkpointing()
+    if model_config is not None and original_use_cache is not None:
+        model_config.use_cache = original_use_cache
 
     substrate_output = output_dir / "substrate"
     tokenizer_output = output_dir / "tokenizer"
