@@ -29,6 +29,13 @@ DTYPES = {
 }
 
 
+def _configured_dtype(config: dict[str, object]) -> torch.dtype:
+    precision = str(config.get("precision", "fp32"))
+    if precision not in DTYPES:
+        raise ValueError(f"unsupported precision: {precision}")
+    return DTYPES[precision]
+
+
 def _load_reference_substrate(config: dict[str, object]) -> tuple[torch.nn.Module, object]:
     try:
         from transformers import AutoModel, AutoTokenizer
@@ -39,9 +46,6 @@ def _load_reference_substrate(config: dict[str, object]) -> tuple[torch.nn.Modul
     substrate_revision = str(config["substrate_revision"])
     tokenizer_id = config.get("tokenizer_id") or substrate_id
     tokenizer_revision = config.get("tokenizer_revision") or substrate_revision
-    precision = str(config.get("precision", "bf16"))
-    if precision not in DTYPES:
-        raise ValueError(f"unsupported precision: {precision}")
 
     tokenizer = AutoTokenizer.from_pretrained(
         str(tokenizer_id),
@@ -50,7 +54,7 @@ def _load_reference_substrate(config: dict[str, object]) -> tuple[torch.nn.Modul
     model = AutoModel.from_pretrained(
         substrate_id,
         revision=substrate_revision,
-        torch_dtype=DTYPES[precision],
+        torch_dtype=_configured_dtype(config),
     )
     return model, tokenizer
 
@@ -185,13 +189,14 @@ def main() -> None:
                 f"[{minimum_candidates}, {maximum_candidates}]"
             )
 
+    dtype = _configured_dtype(config)
     model, tokenizer = _load_reference_substrate(config)
-    model.to(device)
+    model.to(device=device, dtype=dtype)
     head_config = dict(config.get("head", {}))
     head = ScalarDecisionHead(
         _hidden_size(model),
         bias=bool(head_config.get("bias", True)),
-    ).to(device)
+    ).to(device=device, dtype=dtype)
 
     output_dir = Path(str(config.get("output_dir", "artifacts/a0-reference-v0.1")))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -219,7 +224,10 @@ def main() -> None:
     )
     executed_stages.append("head-warmup")
 
-    warmup_accuracy = float(history[-1]["validation"]["accuracy"])  # type: ignore[index]
+    validation_row = history[-1]["validation"]
+    if not isinstance(validation_row, dict):
+        raise TypeError("validation history must be a mapping")
+    warmup_accuracy = float(validation_row["accuracy"])
     chance_accuracy = _chance_accuracy(validation_examples)
     gate = dict(config.get("warmup_gate", {}))
     minimum_margin = float(gate.get("minimum_accuracy_margin", 0.02))
