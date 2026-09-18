@@ -2,6 +2,8 @@
 
 This directory is the working area for Athrub Phase 1.
 
+Performance/equivalence claims here use the frozen `Athrub A0 Reference v0.1` defined by `docs/A0_REFERENCE.md`. The reference substrate is a replaceable experimental dependency, not Athrub architecture identity.
+
 The experiment must preserve a strict separation between:
 
 - **reference execution** — canonical full candidate-path computation
@@ -14,8 +16,9 @@ The experiment must preserve a strict separation between:
 Each experiment run should emit machine-readable artifacts containing:
 
 - implementation name
-- git revision
-- model/tokenizer revision
+- Athrub git revision
+- frozen substrate/tokenizer revisions or hashes
+- decision-head hash
 - precision
 - workload shape
 - exact token counts
@@ -26,8 +29,8 @@ Each experiment run should emit machine-readable artifacts containing:
 - probabilities
 - numerical comparison against reference
 
-Research result files and checkpoints are intentionally excluded from Git; publish stable summaries or release artifacts separately when they become part of the project record.
+Identity-bearing acquisition details for the reference substrate remain in private research provenance. Research result files and checkpoints are intentionally excluded from Git; publish stable summaries or identity-neutral release artifacts separately when they become part of the project record.
 
 ## First implementation task
 
-Implement the reference backend behind `athrub.backends.DecisionBackend`, then implement shared-context execution behind the same contract. The benchmark and comparison layers must not know which execution strategy is being measured.
+Freeze the meaningful A0 reference, then exercise `FlatReferenceBackend` and `SharedContextBackend` behind the same `athrub.backends.DecisionBackend` contract. The benchmark and comparison layers must not know which execution strategy is being measured.
