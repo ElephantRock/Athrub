@@ -63,6 +63,7 @@ class ReferenceFreezeInputs:
     benchmark_artifact_path: Path
     environment_manifest_path: Path
     precision: tuple[str, ...]
+    training_stages: tuple[str, ...] = ("head-warmup", "brief-full-adaptation")
     parameter_count: int | None = None
     head_bias: bool = True
 
@@ -74,9 +75,17 @@ def build_reference_manifest(inputs: ReferenceFreezeInputs) -> dict[str, object]
         raise ValueError("A0 v0.1 freeze must use the canonical reference name")
     if not inputs.precision:
         raise ValueError("at least one precision mode is required")
-    unsupported = set(inputs.precision) - {"fp32", "bf16"}
-    if unsupported:
-        raise ValueError(f"unsupported precision modes: {sorted(unsupported)}")
+    unsupported_precision = set(inputs.precision) - {"fp32", "bf16"}
+    if unsupported_precision:
+        raise ValueError(f"unsupported precision modes: {sorted(unsupported_precision)}")
+    if not inputs.training_stages:
+        raise ValueError("at least one training stage is required")
+    supported_stages = {"head-warmup", "brief-full-adaptation"}
+    unsupported_stages = set(inputs.training_stages) - supported_stages
+    if unsupported_stages:
+        raise ValueError(f"unsupported training stages: {sorted(unsupported_stages)}")
+    if inputs.training_stages[0] != "head-warmup":
+        raise ValueError("A0 training must begin with head-warmup")
 
     substrate: dict[str, object] = {
         "artifact_sha256": sha256_path(inputs.substrate_path),
@@ -113,7 +122,7 @@ def build_reference_manifest(inputs: ReferenceFreezeInputs) -> dict[str, object]
             "config_sha256": sha256_path(inputs.training_config_path),
             "data_manifest_sha256": sha256_path(inputs.data_manifest_path),
             "objective": "categorical-cross-entropy",
-            "stages": ["head-warmup", "brief-full-adaptation"],
+            "stages": list(inputs.training_stages),
         },
         "benchmark": {
             "config_sha256": sha256_path(inputs.benchmark_config_path),
