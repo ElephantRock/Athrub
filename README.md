@@ -6,9 +6,32 @@ The first research objective is deliberately narrow:
 
 > Can Athrub encode common decision context once, reuse that computation across candidate evaluations, and preserve the resulting decision probabilities?
 
+## Project identity
+
+Athrub architecture and terminology are Athrub-native. A temporary pretrained causal Transformer may be used as an **A0 reference substrate** to establish a meaningful frozen correctness oracle, but that substrate is an experimental dependency rather than the Athrub architecture or model identity.
+
+Identity-bearing acquisition details for any external research substrate stay in private research provenance. Public Athrub manifests use immutable content hashes, opaque provenance identifiers, and Athrub-native terminology.
+
+## A0: Frozen reference
+
+Before Phase 1 performance work, Athrub freezes one meaningful decision model as `Athrub A0 Reference v0.1`.
+
+A0 keeps the architecture intentionally simple:
+
+- causal Transformer reference substrate near the 0.6B scale
+- fixed tokenizer
+- `TextDecisionCodec` v0.1
+- scalar linear decision head
+- categorical cross-entropy
+- head-only warm-up followed, if justified, by brief full decision adaptation
+- initial 2–16 candidate training range
+- initial planning envelope of 50k–200k bounded decisions
+
+The complete freeze protocol is specified in `docs/A0_REFERENCE.md`. The public reference manifest must validate against `schemas/reference_manifest.schema.json`.
+
 ## Phase 1: Shared Computation
 
-Phase 1 establishes the reference implementation and the benchmark harness required to test shared-context inference rigorously.
+Phase 1 establishes the benchmark evidence required to test shared-context inference rigorously.
 
 Primary deliverables:
 
@@ -41,22 +64,22 @@ The backend records exact tokenizer accounting for each request:
 - token count for every candidate suffix
 - complete path lengths
 - total logical token positions processed by flat execution
-- model and tokenizer revisions
+- reference-substrate and tokenizer revisions
 - numerical precision
 
-Install the optional model-loading dependencies with:
+Install the optional reference-loading dependencies with:
 
 ```bash
 pip install -e '.[reference]'
 ```
 
-Copy `configs/reference.example.json`, replace the placeholder model/checkpoint values with immutable revisions and a trained Athrub scalar-head checkpoint, then run:
+Copy `configs/reference.example.json`, replace the placeholder reference-substrate/checkpoint values with immutable revisions and a trained Athrub scalar-head checkpoint, then run:
 
 ```bash
 python benchmarks/reference_backend.py --config path/to/reference.json
 ```
 
-Synthetic workloads control shape precisely; `semantic_smoke_requests()` supplies natural decision text for equivalence checks. Neither is intended to substitute for later accuracy or calibration benchmarks.
+Synthetic workloads control shape precisely; `semantic_smoke_requests()` supplies natural decision text for equivalence checks. Neither substitutes for later accuracy or calibration benchmarks.
 
 ## Repository layout
 
@@ -64,8 +87,9 @@ Synthetic workloads control shape precisely; `semantic_smoke_requests()` supplie
 src/athrub/                 Core package
 experiments/shared_context/ Phase 1 research code and notes
 benchmarks/                 Benchmark entry points
-configs/                    Reproducible experiment configurations
+configs/                    Public identity-neutral experiment templates
 docs/                       Architecture and research specifications
+schemas/                    Machine-readable artifact contracts
 tests/                      Numerical and contract tests
 ```
 
@@ -75,8 +99,9 @@ tests/                      Numerical and contract tests
 2. Preserve full probability distributions, not only argmax decisions.
 3. Measure wall-clock performance and computational work separately.
 4. Treat calibration, numerical stability, and out-of-distribution behavior as first-class properties.
-5. Record model, tokenizer, code, hardware, precision, and environment revisions for every benchmark.
+5. Record code, substrate, tokenizer, head, hardware, precision, configuration, and environment identity for every canonical benchmark.
+6. Keep external research identity in private provenance; keep Athrub public architecture vocabulary independent.
 
 ## Status
 
-Phase 1 reference-backend and shared-context prototypes are implemented. The next milestone is complete only after an Athrub checkpoint, tokenizer revision, scalar-head checkpoint, and canonical benchmark artifact are frozen together.
+The flat and shared-context execution prototypes exist and pass CPU contract/equivalence tests. The A0 milestone remains open until a trained reference substrate, tokenizer, scalar-head checkpoint, dataset manifest, and canonical benchmark artifact are frozen together.
