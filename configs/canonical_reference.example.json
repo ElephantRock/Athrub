@@ -1,0 +1,28 @@
+{
+  "reference_name": "Athrub A0 Reference v0.1",
+  "substrate_path": "artifacts/a0-reference-v0.1-run1/substrate",
+  "tokenizer_path": "artifacts/a0-reference-v0.1-run1/tokenizer",
+  "decision_head_path": "artifacts/a0-reference-v0.1-run1/decision_head.pt",
+  "device": "cuda",
+  "head_bias": true,
+  "add_bos": true,
+  "attention_policy": {
+    "backend": "efficient_sdpa",
+    "gqa_strategy": "expand_kv_heads",
+    "q_to_kv_ratio": 2,
+    "fallback_allowed": false
+  },
+  "precisions": ["fp32", "bf16"],
+  "semantic": {
+    "warmups": 5,
+    "repeats": 20
+  },
+  "shape": {
+    "prefix_units": [128, 512, 1024],
+    "candidate_counts": [2, 8, 16],
+    "candidate_units": 16,
+    "warmups": 2,
+    "repeats": 10
+  },
+  "output_dir": "artifacts/canonical-benchmark"
+}
