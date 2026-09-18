@@ -61,6 +61,16 @@ The relevant comparisons are receiver-only, text-mediated adviser, semantic-stat
 
 Research boundary: `docs/SEMANTIC_STATE_ENRICHMENT.md`.
 
+### Non-gating research sidecar — offline objective compilation
+
+After A2, Athrub may also reassess whether an expensive offline teacher, search, ensemble, or reward process can generate provenance-bound bounded-decision supervision that recovers quality or calibration in a smaller serving model.
+
+This is not an A3 requirement and does not change the scale sequence. It becomes relevant only when a measured forcing function exists—for example, parameter reduction causes unacceptable quality loss, domain transfer remains insufficient, a desired multi-objective behavior is too expensive to optimize online, or direct serving of a stronger process violates latency/cost constraints.
+
+Any trial must separate student serving economics from offline synthesis/training economics. A compact student is not evidence of exact teacher equivalence, low total learning cost, or general-purpose capability. Data-volume-matched controls, teacher/student disagreement, calibration, holdout contamination checks, and immutable generation provenance are mandatory.
+
+Research boundary: `docs/OFFLINE_OBJECTIVE_COMPILATION.md`.
+
 ## A4 — Multi-domain decision benchmark
 
 Goal: evaluate whether the learned decision capability transfers across unrelated semantic domains.
@@ -68,6 +78,8 @@ Goal: evaluate whether the learned decision capability transfers across unrelate
 Key requirement: complete domain holdouts, not only random example splits.
 
 If semantic-state enrichment is ever trialed in A4/A5 research, receiver-only and enriched paths must be reported separately so cross-domain capability is not confused with adviser capability.
+
+If offline objective compilation is trialed, held-out domains must be isolated from target generation, reward feedback, teacher selection, filtering, and other training supervision. Synthetic volume must not be presented as domain-transfer evidence.
 
 ## A5 — General Athrub model
 
@@ -77,6 +89,8 @@ Target: useful zero-shot behavior with efficient specialization from limited dom
 
 Any optional adviser mechanism remains separable from the general Athrub predictor. Generality claims must identify whether they describe the receiver alone or the complete enriched system.
 
+Any compiled offline supervision remains separable from the generality claim. Athrub must report which domains supplied teacher/optimizer targets and retain complete-domain holdouts before describing the compact student as general-purpose.
+
 ## A6 — Domain adaptation and calibration
 
 Goal: separate reusable prediction capability from local policy and domain calibration.
@@ -85,6 +99,8 @@ Artifacts may include lightweight adapters, calibration parameters, and abstenti
 
 If later evidence justifies conditional semantic-state enrichment, routing belongs behind explicit calibration/uncertainty policy rather than being silently embedded into core probability semantics.
 
+If compiled supervision is used for specialization, local reward functions, thresholds, or policy preferences remain explicit adaptation artifacts rather than universal Athrub probability semantics.
+
 ## A7 — Production runtime
 
 Goal: validate Athrub in a bounded, measurable real-world workflow where decision latency, cost, quality, uncertainty, and escalation can all be observed.
@@ -92,3 +108,5 @@ Goal: validate Athrub in a bounded, measurable real-world workflow where decisio
 The production gate requires comparison against deterministic rules and appropriate larger-model baselines.
 
 Any adviser/enrichment path must be qualified as a full-system deployment path, including fallback behavior, adviser availability, negative transfer, concurrency, memory residency, and total cost per bounded decision.
+
+Any compact model created through offline objective compilation must be compared with direct stronger-model and calibrated escalation baselines, while reporting offline refresh/retraining cost separately from serving cost.
