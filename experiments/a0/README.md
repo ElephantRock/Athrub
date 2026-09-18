@@ -4,6 +4,32 @@ This directory contains the executable workflow used to create `Athrub A0 Refere
 
 A0 training is not the final Athrub architecture. Its sole purpose is to produce a meaningful, frozen correctness reference for the A1 shared-computation experiment.
 
+## Athrub-native bootstrap corpus
+
+For the first run, Athrub can generate its own programmatically verifiable bootstrap supervision without depending on an external decision dataset:
+
+```bash
+python experiments/a0/generate_reference_data.py \
+  --output-dir artifacts/a0-data-v0.1 \
+  --train-count 50000 \
+  --validation-count 5000
+```
+
+The v0.1 generator balances eight task families:
+
+- largest-value selection
+- closest-target selection
+- capacity-constrained choice
+- deadline-constrained choice
+- explicit route-cost minimization
+- efficiency-ratio maximization
+- arithmetic-sequence continuation
+- multi-constraint lowest-cost selection
+
+Candidate order is shuffled after the correct answer is computed. Training and validation use independent seeds. The generated manifest records generator version, family counts, label-position counts, candidate-count range, seeds, and SHA-256 hashes.
+
+This corpus is deliberately a bootstrap asset. Success on it is **not** evidence of broad domain transfer or production capability. Later A0 revisions may add independently labeled semantic data, but the first shared-computation experiment does not require that expansion.
+
 ## Data contract
 
 Training and validation files use JSONL. Every line is one bounded decision:
