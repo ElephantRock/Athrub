@@ -215,6 +215,16 @@ The earliest meaningful reassessment is after A2 has established a trainable sha
 
 The public Athrub research boundary is specified in `docs/SEMANTIC_STATE_ENRICHMENT.md`.
 
+## Future research sidecar — offline objective compilation
+
+A separate post-A2 hypothesis asks whether an expensive offline teacher, search, ensemble, or reward process can create provenance-bound bounded-decision supervision that a compact Athrub model can learn and serve without executing that expensive process on every request.
+
+This is intentionally outside the A2 architecture comparison and A2 go/no-go gate. It cannot be used to compensate for a weak A2 arm after results are known, and it cannot be presented as A1 equivalence. A compact student is a newly trained model whose quality, calibration, teacher/student disagreement, holdout integrity, offline synthesis/training cost, and serving cost must be measured separately.
+
+The earliest meaningful reassessment is after A2 has selected a valid trainable architecture and a later phase exposes a measured forcing function such as model-size quality loss, insufficient domain transfer, expensive online multi-objective optimization, or unacceptable direct serving cost.
+
+The public Athrub research boundary is specified in `docs/OFFLINE_OBJECTIVE_COMPILATION.md`.
+
 ## Non-goals
 
 A2 does not attempt to:
@@ -224,6 +234,7 @@ A2 does not attempt to:
 - add production policy thresholds or escalation logic;
 - introduce domain-specific adapters as the main architecture;
 - add cross-model semantic-state enrichment as an A2 architecture arm;
+- use teacher/search/reward-generated supervision to alter the primary A2 comparison;
 - claim production value from offline results;
 - import external project terminology into Athrub architecture.
 
@@ -239,4 +250,4 @@ A2 is the first intended research surface for these candidate patterns:
 
 Their presence in the register or this specification means they are eligible for controlled comparison after A1. It does not mean any of them is already adopted, implemented, or verified.
 
-Semantic-state enrichment remains a separate research-only hypothesis. Its documentation does not add an A2 arm, change the A2 exit gate, or create implementation authority.
+Semantic-state enrichment and offline objective compilation remain separate research-only hypotheses. Their documentation does not add A2 arms, change the A2 exit gate, or create implementation authority.
