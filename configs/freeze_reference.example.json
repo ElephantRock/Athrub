@@ -1,0 +1,21 @@
+{
+  "reference_name": "Athrub A0 Reference v0.1",
+  "athrub_commit": "REPLACE_WITH_PINNED_ATHRUB_COMMIT",
+  "substrate_path": "PRIVATE_OR_LOCAL_SUBSTRATE_BUNDLE",
+  "substrate_revision": "REPLACE_WITH_IMMUTABLE_SUBSTRATE_REVISION",
+  "substrate_private_provenance_id": "PRIVATE-PROV-SUBSTRATE-001",
+  "tokenizer_path": "PRIVATE_OR_LOCAL_TOKENIZER_BUNDLE",
+  "tokenizer_revision": "REPLACE_WITH_IMMUTABLE_TOKENIZER_REVISION",
+  "tokenizer_private_provenance_id": "PRIVATE-PROV-TOKENIZER-001",
+  "decision_head_path": "artifacts/reference/decision_head.pt",
+  "codec_source_commit": "REPLACE_WITH_PINNED_CODEC_COMMIT",
+  "training_config_path": "artifacts/reference/training_config.json",
+  "data_manifest_path": "artifacts/reference/data_manifest.json",
+  "benchmark_config_path": "artifacts/reference/benchmark_config.json",
+  "benchmark_artifact_path": "artifacts/reference/reference_benchmark.jsonl",
+  "environment_manifest_path": "artifacts/reference/environment.json",
+  "precision": ["fp32", "bf16"],
+  "parameter_count": 600000000,
+  "head_bias": true,
+  "output": "artifacts/reference/reference_manifest.json"
+}
