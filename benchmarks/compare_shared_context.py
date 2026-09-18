@@ -27,7 +27,7 @@ DTYPES = {
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/reference.example.json")
+    parser.add_argument("--config", default="configs/shared_context.example.json")
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -37,8 +37,8 @@ def main() -> None:
         raise ValueError(f"unsupported dtype: {dtype_name}")
 
     reference = FlatReferenceBackend.from_pretrained(
-        model_id=str(config["model_id"]),
-        revision=str(config["revision"]),
+        substrate_id=str(config["substrate_id"]),
+        substrate_revision=str(config["substrate_revision"]),
         tokenizer_id=config.get("tokenizer_id"),
         tokenizer_revision=config.get("tokenizer_revision"),
         head_path=str(config["head_path"]),
@@ -55,7 +55,7 @@ def main() -> None:
         dtype=reference.dtype,
         codec=reference.codec,
         add_bos=reference.add_bos,
-        model_revision=reference.model_revision,
+        substrate_revision=reference.substrate_revision,
         tokenizer_revision=reference.tokenizer_revision,
         profile_stages=bool(config.get("profile_stages", False)),
     )
@@ -85,6 +85,7 @@ def main() -> None:
 
     report = {
         "environment": environment_metadata(),
+        "reference_name": config.get("reference_name"),
         "precision": dtype_name,
         "comparison": summarize(comparisons),
         "reference_latency": latency_summary(reference_records),
