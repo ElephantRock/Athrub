@@ -7,6 +7,7 @@
   "required": ["request_id", "question", "candidates"],
   "properties": {
     "request_id": { "type": "string", "minLength": 1 },
+    "task_family": { "type": "string", "minLength": 1 },
     "state": { "type": "string" },
     "question": { "type": "string", "minLength": 1 },
     "candidates": {
