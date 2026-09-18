@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 GENERATOR_VERSION = "0.1"
 
 
@@ -41,7 +40,7 @@ class GeneratedDecision:
 
 
 def _stable_id(family: str, seed: int, index: int) -> str:
-    payload = f"{GENERATOR_VERSION}:{family}:{seed}:{index}".encode("utf-8")
+    payload = f"{GENERATOR_VERSION}:{family}:{seed}:{index}".encode()
     return f"a0-{family}-{hashlib.sha256(payload).hexdigest()[:16]}"
 
 
