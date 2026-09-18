@@ -1,0 +1,146 @@
+# Phase 1 — Shared Computation
+
+## Research question
+
+Can Athrub encode common decision context once, reuse that computation across candidate evaluations, and preserve the resulting probability distribution?
+
+Phase 1 deliberately changes inference computation before changing model weights, datasets, or training objectives.
+
+## Hypothesis
+
+For a shared prefix of length `L_p`, `K` candidates, and average candidate suffix length `L_c`, a flat implementation repeatedly processes approximately:
+
+```text
+K * (L_p + L_c)
+```
+
+logical token positions.
+
+A shared-context implementation should move toward:
+
+```text
+L_p + K * L_c
+```
+
+The theoretical reduction is not assumed to translate directly into wall-clock speedup. Kernel launch cost, memory movement, attention implementation, batching efficiency, and cache layout must be measured separately.
+
+## Implementations
+
+Phase 1 compares four execution paths:
+
+1. **Reference flat** — canonical candidate-path execution.
+2. **Optimized flat** — equivalent semantics with packing/batching improvements only.
+3. **Shared context** — shared prefix state with branched candidate continuation.
+4. **Shared packed** — shared prefix state plus packed candidate continuation.
+
+Implementation 2 is a required control: ordinary packing improvements must not be misattributed to shared computation.
+
+## Workload matrix
+
+Primary candidate counts:
+
+```text
+2, 4, 8, 16, 32, 64, 128, 255
+```
+
+Primary context lengths:
+
+```text
+128, 512, 1024, 2048, 4096, 8192
+```
+
+At minimum, include short-prefix/high-cardinality, balanced, and long-prefix/low-cardinality regimes.
+
+Synthetic workloads exist to control shape precisely. Research conclusions must also be reproduced on representative semantic workloads.
+
+## Correctness metrics
+
+For every decision compare the complete outputs, not only the winning candidate.
+
+Record:
+
+- argmax agreement
+- maximum absolute logit difference
+- mean absolute logit difference
+- maximum absolute probability difference
+- mean absolute probability difference
+- total variation distance
+- KL divergence from reference to candidate implementation
+
+FP32 is the primary numerical reference. BF16 is evaluated separately.
+
+### Initial equivalence targets
+
+FP32 target:
+
+```text
+max absolute probability delta < 1e-5
+```
+
+BF16 target:
+
+```text
+max absolute probability delta < 1e-3
+100% argmax agreement on controlled equivalence suite
+```
+
+These are engineering targets, not immutable scientific thresholds; any relaxation must be documented with evidence.
+
+## Performance metrics
+
+Record separately:
+
+- warm p50/p90/p95/p99 latency
+- end-to-end backend latency
+- throughput in requests/s
+- throughput in candidates/s
+- exact tokenizer token counts when available
+- estimated FLOPs
+- measured GPU kernel time where available
+- peak allocated VRAM
+- peak reserved VRAM
+
+Do not infer architectural efficiency from latency alone.
+
+## Benchmark discipline
+
+Every primary benchmark artifact must record:
+
+- git commit
+- model revision
+- tokenizer revision
+- hardware model
+- driver/CUDA version
+- PyTorch version
+- precision
+- batch shape
+- warmup count
+- repeat count
+- random seed where applicable
+
+Primary comparisons must use identical hardware and software environments.
+
+## Go / no-go gate
+
+Proceed to trainable shared computation when all of the following hold:
+
+1. Numerical equivalence is demonstrated within documented tolerances.
+2. Candidate ordering and decision semantics remain unchanged.
+3. Shared computation produces at least one material efficiency benefit on representative multi-candidate workloads, initially targeted as either:
+   - >= 2x effective throughput, or
+   - >= 50% reduction in measured computational work.
+4. VRAM growth does not erase the operational benefit.
+
+If theoretical work falls dramatically while wall-clock improvement remains small, the next investigation is kernel/memory-layout optimization rather than an immediate claim of architectural speedup.
+
+## Non-goals
+
+Phase 1 does not attempt to:
+
+- train a new foundation model
+- reduce parameter count
+- introduce new reinforcement-learning objectives
+- claim domain generality
+- establish production safety or calibration
+
+Those are later phases and would confound the first architectural question.

@@ -1,0 +1,14 @@
+{
+  "model_id": "REPLACE_WITH_MODEL_OR_LOCAL_PATH",
+  "revision": "REPLACE_WITH_IMMUTABLE_MODEL_REVISION",
+  "tokenizer_id": null,
+  "tokenizer_revision": null,
+  "head_path": "artifacts/reference/decision_head.pt",
+  "device": "cuda",
+  "dtype": "float32",
+  "head_bias": true,
+  "add_bos": true,
+  "warmups": 5,
+  "repeats": 20,
+  "output": "artifacts/benchmarks/reference-semantic.jsonl"
+}

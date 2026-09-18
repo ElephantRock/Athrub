@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.DS_Store
+
+# Research outputs
+results/
+artifacts/
+checkpoints/
+*.safetensors
+*.pt
+*.pth
+
+# Local profiler output
+nsys-rep/
+*.nsys-rep
+*.qdrep

@@ -1,0 +1,18 @@
+{
+  "phase": "A1-shared-computation",
+  "precision_modes": ["fp32", "bf16"],
+  "prefix_units": [128, 512, 1024, 2048, 4096, 8192],
+  "candidate_counts": [2, 4, 8, 16, 32, 64, 128, 255],
+  "candidate_units": [16],
+  "warmups": 5,
+  "repeats": 20,
+  "equivalence_targets": {
+    "fp32_max_abs_probability_delta": 1e-5,
+    "bf16_max_abs_probability_delta": 1e-3,
+    "argmax_agreement": 1.0
+  },
+  "go_gate": {
+    "minimum_effective_throughput_multiplier": 2.0,
+    "minimum_measured_compute_reduction_fraction": 0.5
+  }
+}
