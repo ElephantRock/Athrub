@@ -19,13 +19,25 @@ Exit condition: a trained `Athrub A0 Reference v0.1` can be regenerated from its
 
 Goal: encode common context once and reuse it across candidate-specific computation without materially changing probabilities.
 
+A1 changes execution only. Candidate serialization, model weights, training objective, decision semantics, and candidate-continuation behavior remain fixed so the repeated-context hypothesis can be tested without architectural confounds.
+
 Exit condition: numerical equivalence plus a material efficiency gain on representative workloads.
 
 ## A2 — Trainable shared architecture
 
-Goal: train shared computation end to end rather than using inference-only cache reuse.
+Goal: train shared computation end to end and test whether full candidate-specific Transformer continuation is still necessary once a reusable shared decision representation exists.
 
-Exit condition: <1 percentage point absolute quality loss against the reference target while delivering a substantial compute or throughput advantage.
+A2 begins only after the A1 go gate passes. It compares three controlled architecture families under the same bounded probability contract:
+
+1. **Trainable shared continuation** — the trainable form of the A1 decomposition and the primary control.
+2. **Independent context/candidate encoding + lightweight compatibility scoring** — context and candidate representations are produced separately, then one aligned logit is produced per candidate.
+3. **Independent encoding + late interaction** — the same separation with a small bounded interaction/refinement stage before scoring.
+
+Every arm must return one logit per supplied candidate and normalize over exactly the candidates in that request. Runtime candidate semantics may be explored, but independent sigmoid scores do not replace the current mutually exclusive Athrub probability distribution.
+
+Detailed experiment contract: `docs/A2_TRAINABLE_ARCHITECTURE.md`.
+
+Exit condition: <1 percentage point absolute quality loss against the reference target, preserved probability semantics and acceptable calibration, plus a substantial measured compute/latency/throughput/memory advantage in a representative multi-candidate regime.
 
 ## A3 — Architecture scaling
 
@@ -37,7 +49,7 @@ Planned scale sequence:
 ~600M -> ~300M -> ~150M -> ~100M
 ```
 
-Model-size reduction is introduced only after the shared-computation architecture is validated.
+Model-size reduction is introduced only after the A2 architecture is validated. Size and candidate-computation structure must not be changed simultaneously in the primary A2 comparison.
 
 ## A4 — Multi-domain decision benchmark
 
