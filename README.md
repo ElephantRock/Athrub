@@ -44,7 +44,7 @@ Primary deliverables:
 
 Success requires preserving decision quality while materially reducing repeated computation for multi-candidate workloads.
 
-A1 deliberately preserves candidate continuation semantics. Runtime candidate encoders, candidate-compatibility heads, late-interaction redesigns, and semantic-state enrichment are excluded until the A1 equivalence/efficiency gate is passed.
+A1 deliberately preserves candidate continuation semantics. Runtime candidate encoders, candidate-compatibility heads, late-interaction redesigns, semantic-state enrichment, and offline objective compilation are excluded until the A1 equivalence/efficiency gate is passed.
 
 ## A2: Trainable Shared Architecture
 
@@ -65,6 +65,14 @@ A separate, non-gating research hypothesis asks whether a validated Athrub share
 This is not an A1 optimization and not a fourth A2 architecture arm. Unlike shared-prefix reuse, enrichment intentionally introduces additional information and may change the decision distribution. It can only be assessed after the shared architecture is established, and any claim must account for the complete system rather than only the receiver model.
 
 The research boundary, controls, failure model, and full-system efficiency requirements are specified in `docs/SEMANTIC_STATE_ENRICHMENT.md`.
+
+## Future research sidecar: offline objective compilation
+
+Another non-gating hypothesis asks whether an expensive offline teacher, search, ensemble, or reward process can generate bounded-decision supervision that is later learned by a compact Athrub serving model.
+
+This is not shared-prefix reuse and not an A2 architecture arm. A compiled student is a newly trained model, so useful behavior, calibration, teacher/student disagreement, holdout contamination, offline synthesis/training cost, and serving economics must be measured independently. Low serving latency or parameter count is not evidence of exact teacher equivalence or low total learning cost.
+
+The research boundary and required controls are specified in `docs/OFFLINE_OBJECTIVE_COMPILATION.md`.
 
 ## Core decision contract
 
@@ -115,7 +123,7 @@ schemas/                    Machine-readable artifact contracts
 tests/                      Numerical and contract tests
 ```
 
-Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, `docs/A2_TRAINABLE_ARCHITECTURE.md`, and `docs/SEMANTIC_STATE_ENRICHMENT.md`. Architecture-pattern research remains non-binding until linked through an explicit roadmap/specification decision.
+Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, `docs/A2_TRAINABLE_ARCHITECTURE.md`, `docs/SEMANTIC_STATE_ENRICHMENT.md`, and `docs/OFFLINE_OBJECTIVE_COMPILATION.md`. Architecture-pattern research remains non-binding until linked through an explicit roadmap/specification decision.
 
 ## Research principles
 
@@ -127,6 +135,7 @@ Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, `docs/A2
 6. Keep external research identity in private provenance; keep Athrub public architecture vocabulary independent.
 7. Treat runtime candidate representation and compatibility scoring as post-A1 hypotheses until controlled A2 evidence exists.
 8. Treat semantic-state enrichment as post-A2 research unless an explicit Athrub decision promotes a bounded trial; count adviser compute, memory, latency, and negative transfer as part of the system claim.
+9. Treat offline objective compilation as post-A2 research unless a measured quality/scale/transfer/serving-cost pressure exists; separate student utility from teacher equivalence and serving cost from offline synthesis/training cost.
 
 ## Status
 
