@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ class DecisionTrainingExample:
     question: str
     candidates: tuple[str, ...]
     target_distribution: tuple[float, ...]
+    task_family: str | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -45,6 +47,8 @@ class DecisionTrainingExample:
         total = sum(self.target_distribution)
         if not math.isclose(total, 1.0, rel_tol=1e-6, abs_tol=1e-6):
             raise ValueError("target_distribution must sum to one")
+        if self.task_family is not None and not self.task_family:
+            raise ValueError("task_family must be non-empty when supplied")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,12 +89,14 @@ def _normalize_target(record: dict[str, Any], candidate_count: int) -> tuple[flo
 def example_from_mapping(record: dict[str, Any]) -> DecisionTrainingExample:
     candidates = tuple(str(value) for value in record["candidates"])
     target = _normalize_target(record, len(candidates))
+    family_value = record.get("task_family")
     return DecisionTrainingExample(
         request_id=str(record["request_id"]),
         state=str(record.get("state", "")),
         question=str(record["question"]),
         candidates=candidates,
         target_distribution=target,
+        task_family=str(family_value) if family_value is not None else None,
     )
 
 
@@ -347,3 +353,35 @@ def run_decision_epoch(
         rows.append(metrics_from_logits(detached, prepared.targets))
 
     return merge_metrics(rows)
+
+
+def evaluate_by_family(
+    *,
+    model: nn.Module,
+    head: ScalarDecisionHead,
+    tokenizer: TokenizerLike,
+    examples: Sequence[DecisionTrainingExample],
+    batch_size: int,
+    device: str | torch.device,
+    codec: TextDecisionCodec | None = None,
+    add_bos: bool = True,
+) -> dict[str, DecisionMetrics]:
+    """Evaluate each declared task family independently."""
+
+    grouped: dict[str, list[DecisionTrainingExample]] = defaultdict(list)
+    for example in examples:
+        grouped[example.task_family or "unlabeled"].append(example)
+    return {
+        family: run_decision_epoch(
+            model=model,
+            head=head,
+            tokenizer=tokenizer,
+            examples=family_examples,
+            batch_size=batch_size,
+            device=device,
+            optimizer=None,
+            codec=codec,
+            add_bos=add_bos,
+        )
+        for family, family_examples in sorted(grouped.items())
+    }
