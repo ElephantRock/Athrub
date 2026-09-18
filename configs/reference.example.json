@@ -1,6 +1,7 @@
 {
-  "model_id": "REPLACE_WITH_MODEL_OR_LOCAL_PATH",
-  "revision": "REPLACE_WITH_IMMUTABLE_MODEL_REVISION",
+  "reference_name": "Athrub A0 Reference v0.1",
+  "substrate_id": "PRIVATE_OR_LOCAL_REFERENCE",
+  "substrate_revision": "REPLACE_WITH_IMMUTABLE_SUBSTRATE_REVISION",
   "tokenizer_id": null,
   "tokenizer_revision": null,
   "head_path": "artifacts/reference/decision_head.pt",

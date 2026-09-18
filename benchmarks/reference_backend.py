@@ -35,8 +35,8 @@ def main() -> None:
         raise ValueError(f"unsupported dtype: {dtype_name}")
 
     backend = FlatReferenceBackend.from_pretrained(
-        model_id=str(config["model_id"]),
-        revision=str(config["revision"]),
+        substrate_id=str(config["substrate_id"]),
+        substrate_revision=str(config["substrate_revision"]),
         tokenizer_id=config.get("tokenizer_id"),
         tokenizer_revision=config.get("tokenizer_revision"),
         head_path=str(config["head_path"]),
@@ -58,6 +58,7 @@ def main() -> None:
 
     report = {
         "environment": environment_metadata(),
+        "reference_name": config.get("reference_name"),
         "backend": backend.name,
         "requests": len(requests),
         "records": len(records),

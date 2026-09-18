@@ -66,7 +66,7 @@ def make_backend() -> tuple[FlatReferenceBackend, ContextAccumulatingModel]:
             head=head,
             device="cpu",
             dtype=torch.float32,
-            model_revision="model-revision-test",
+            substrate_revision="substrate-revision-test",
             tokenizer_revision="tokenizer-revision-test",
         ),
         model,
@@ -157,7 +157,7 @@ def test_reference_backend_emits_exact_token_accounting() -> None:
     assert len(path_counts) == len(request.candidates)
     assert result.metadata["prefix_tokens"] > 0
     assert result.metadata["flat_logical_token_positions"] == sum(path_counts)
-    assert result.metadata["model_revision"] == "model-revision-test"
+    assert result.metadata["substrate_revision"] == "substrate-revision-test"
     assert result.metadata["tokenizer_revision"] == "tokenizer-revision-test"
 
 
@@ -181,3 +181,4 @@ def test_benchmark_prefers_exact_backend_token_counts() -> None:
     assert record.metadata["flat_logical_token_positions"] == result.metadata[
         "flat_logical_token_positions"
     ]
+    assert record.metadata["substrate_revision"] == "substrate-revision-test"

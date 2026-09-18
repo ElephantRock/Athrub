@@ -188,7 +188,7 @@ class SharedContextBackend(FlatReferenceBackend):
             "prefix_compute_calls": 1,
             "continuation_compute_calls": 1,
             "cache_branching": "tensor-expand-view",
-            "model_revision": self.model_revision,
+            "substrate_revision": self.substrate_revision,
             "tokenizer_revision": self.tokenizer_revision,
             "precision": str(
                 self.dtype or next(self.model.parameters(), torch.empty(0)).dtype

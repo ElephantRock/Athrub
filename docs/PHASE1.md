@@ -1,5 +1,11 @@
 # Phase 1 — Shared Computation
 
+## Prerequisite
+
+Phase 1 performance claims begin only after `Athrub A0 Reference v0.1` is frozen under `docs/A0_REFERENCE.md`.
+
+The A0 reference substrate is an experimental dependency rather than Athrub architecture identity. A1 changes execution only; it does not change the frozen weights, tokenizer, decision head, serialization, or candidate semantics.
+
 ## Research question
 
 Can Athrub encode common decision context once, reuse that computation across candidate evaluations, and preserve the resulting probability distribution?
@@ -31,7 +37,7 @@ Phase 1 compares four execution paths:
 1. **Reference flat** — canonical candidate-path execution.
 2. **Optimized flat** — equivalent semantics with packing/batching improvements only.
 3. **Shared context** — shared prefix state with branched candidate continuation.
-4. **Shared packed** — shared prefix state plus packed candidate continuation.
+4. **Shared packed** — shared prefix state plus packed/batched candidate continuation.
 
 Implementation 2 is a required control: ordinary packing improvements must not be misattributed to shared computation.
 
@@ -106,9 +112,12 @@ Do not infer architectural efficiency from latency alone.
 
 Every primary benchmark artifact must record:
 
-- git commit
-- model revision
-- tokenizer revision
+- Athrub git commit
+- frozen reference-substrate revision/hash
+- tokenizer revision/hash
+- decision-head hash
+- codec/source revision
+- private-provenance opaque identifier
 - hardware model
 - driver/CUDA version
 - PyTorch version
@@ -137,7 +146,7 @@ If theoretical work falls dramatically while wall-clock improvement remains smal
 
 Phase 1 does not attempt to:
 
-- train a new foundation model
+- train a new general model
 - reduce parameter count
 - introduce new reinforcement-learning objectives
 - claim domain generality

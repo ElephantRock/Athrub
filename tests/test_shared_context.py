@@ -129,7 +129,7 @@ def test_shared_context_matches_flat_reference(candidate_count: int) -> None:
         head=make_head(),
         device="cpu",
         dtype=torch.float32,
-        model_revision="test-model",
+        substrate_revision="test-substrate",
         tokenizer_revision="test-tokenizer",
     )
     shared = SharedContextBackend(
@@ -138,7 +138,7 @@ def test_shared_context_matches_flat_reference(candidate_count: int) -> None:
         head=make_head(),
         device="cpu",
         dtype=torch.float32,
-        model_revision="test-model",
+        substrate_revision="test-substrate",
         tokenizer_revision="test-tokenizer",
     )
     request = make_request(candidate_count)
@@ -154,6 +154,8 @@ def test_shared_context_matches_flat_reference(candidate_count: int) -> None:
     assert metrics.max_abs_probability_delta < 1e-6
     assert metrics.total_variation < 1e-6
     assert metrics.kl_reference_to_candidate < 1e-9
+    assert reference_result.metadata["substrate_revision"] == "test-substrate"
+    assert shared_result.metadata["substrate_revision"] == "test-substrate"
 
 
 def test_shared_context_reports_reduced_logical_work() -> None:

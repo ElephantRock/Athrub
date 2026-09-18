@@ -1,0 +1,43 @@
+{
+  "reference_name": "Athrub A0 Reference v0.1",
+  "substrate_id": "PRIVATE_OR_LOCAL_REFERENCE",
+  "substrate_revision": "REPLACE_WITH_IMMUTABLE_REVISION",
+  "tokenizer_id": null,
+  "tokenizer_revision": null,
+  "output_dir": "artifacts/a0-reference-v0.1",
+  "seed": 1729,
+  "precision": "bf16",
+  "candidate_count_train_min": 2,
+  "candidate_count_train_max": 16,
+  "objective": "categorical-cross-entropy",
+  "head": {
+    "type": "scalar-linear",
+    "bias": true
+  },
+  "head_warmup": {
+    "enabled": true,
+    "max_steps": 10000,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0
+  },
+  "brief_full_adaptation": {
+    "enabled": true,
+    "epochs": 1,
+    "learning_rate": 0.00001,
+    "weight_decay": 0.01
+  },
+  "data": {
+    "manifest": "PRIVATE_OR_LOCAL_DATA_MANIFEST",
+    "target_examples_min": 50000,
+    "target_examples_max": 200000,
+    "required_supervision": [
+      "programmatically-verifiable",
+      "labeled-bounded-decision"
+    ]
+  },
+  "freeze": {
+    "emit_reference_manifest": true,
+    "reference_manifest_schema": "schemas/reference_manifest.schema.json",
+    "require_sha256": true
+  }
+}
