@@ -16,6 +16,10 @@ checkpoints/
 *.pt
 *.pth
 
+# Private research provenance / identity-bearing reference configuration
+provenance/private/
+configs/private/
+
 # Local profiler output
 nsys-rep/
 *.nsys-rep
