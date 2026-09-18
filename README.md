@@ -44,7 +44,7 @@ Primary deliverables:
 
 Success requires preserving decision quality while materially reducing repeated computation for multi-candidate workloads.
 
-A1 deliberately preserves candidate continuation semantics. Runtime candidate encoders, candidate-compatibility heads, and late-interaction redesigns are excluded until the A1 equivalence/efficiency gate is passed.
+A1 deliberately preserves candidate continuation semantics. Runtime candidate encoders, candidate-compatibility heads, late-interaction redesigns, and semantic-state enrichment are excluded until the A1 equivalence/efficiency gate is passed.
 
 ## A2: Trainable Shared Architecture
 
@@ -57,6 +57,14 @@ The A2 specification compares:
 - independent encoding with a small late-interaction/refinement stage.
 
 Every A2 arm still returns one aligned logit per supplied candidate and applies request-local softmax over exactly that candidate set. The detailed research contract is in `docs/A2_TRAINABLE_ARCHITECTURE.md`.
+
+## Future research sidecar: semantic-state enrichment
+
+A separate, non-gating research hypothesis asks whether a validated Athrub shared decision representation could later be enriched by an independently computed semantic state.
+
+This is not an A1 optimization and not a fourth A2 architecture arm. Unlike shared-prefix reuse, enrichment intentionally introduces additional information and may change the decision distribution. It can only be assessed after the shared architecture is established, and any claim must account for the complete system rather than only the receiver model.
+
+The research boundary, controls, failure model, and full-system efficiency requirements are specified in `docs/SEMANTIC_STATE_ENRICHMENT.md`.
 
 ## Core decision contract
 
@@ -107,7 +115,7 @@ schemas/                    Machine-readable artifact contracts
 tests/                      Numerical and contract tests
 ```
 
-Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, and `docs/A2_TRAINABLE_ARCHITECTURE.md`. Architecture-pattern research remains non-binding until linked through an explicit roadmap/specification decision.
+Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, `docs/A2_TRAINABLE_ARCHITECTURE.md`, and `docs/SEMANTIC_STATE_ENRICHMENT.md`. Architecture-pattern research remains non-binding until linked through an explicit roadmap/specification decision.
 
 ## Research principles
 
@@ -118,6 +126,7 @@ Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, and `doc
 5. Record code, substrate, tokenizer, head, hardware, precision, configuration, and environment identity for every canonical benchmark.
 6. Keep external research identity in private provenance; keep Athrub public architecture vocabulary independent.
 7. Treat runtime candidate representation and compatibility scoring as post-A1 hypotheses until controlled A2 evidence exists.
+8. Treat semantic-state enrichment as post-A2 research unless an explicit Athrub decision promotes a bounded trial; count adviser compute, memory, latency, and negative transfer as part of the system claim.
 
 ## Status
 
