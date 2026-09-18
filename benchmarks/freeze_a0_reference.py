@@ -34,6 +34,12 @@ def main() -> None:
         benchmark_artifact_path=Path(config["benchmark_artifact_path"]),
         environment_manifest_path=Path(config["environment_manifest_path"]),
         precision=tuple(str(value) for value in config["precision"]),
+        training_stages=tuple(
+            str(value)
+            for value in config.get(
+                "training_stages", ["head-warmup", "brief-full-adaptation"]
+            )
+        ),
         parameter_count=(
             int(config["parameter_count"]) if config.get("parameter_count") is not None else None
         ),
