@@ -2,11 +2,18 @@
 
 Athrub is developed through explicit research gates. Later phases are contingent on evidence from earlier ones.
 
-## A0 — Reference implementation
+## A0 — Frozen reference
 
-Goal: establish reproducible decision contracts, workloads, metrics, and baseline execution.
+Goal: create a meaningful, reproducible decision-model correctness oracle without treating the temporary reference substrate as Athrub architecture identity.
 
-Exit condition: deterministic benchmark artifacts can be regenerated from a recorded environment.
+Work:
+
+- short head-only warm-up
+- brief full decision adaptation only if justified by warm-up quality
+- freeze tokenizer, substrate weights, scalar decision head, codec, training/data configuration, and benchmark artifacts
+- publish an identity-neutral manifest backed by private research provenance
+
+Exit condition: a trained `Athrub A0 Reference v0.1` can be regenerated from its recorded provenance bundle and exceeds documented trivial/random controls on the selected bounded-decision suite.
 
 ## A1 — Shared computation
 
