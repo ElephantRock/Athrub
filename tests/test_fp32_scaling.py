@@ -434,7 +434,7 @@ def test_resume_partial_feasibility_contract() -> None:
     with pytest.raises(ValueError, match="binding mismatch"):
         resume_partial_feasibility(stale, binding, ["p128-k2", "p512-k4"], ["a0-route-cost-x"])
     complete = {**partial, "complete": True}
-    with pytest.raises(ValueError, match="only to interrupted preflights"):
+    with pytest.raises(ValueError, match="complete=false marker"):
         resume_partial_feasibility(complete, binding, ["p128-k2", "p512-k4"], ["a0-route-cost-x"])
     unknown = {**partial, "cells": {"p9999-k2": {}}}
     with pytest.raises(ValueError, match="unknown cell"):

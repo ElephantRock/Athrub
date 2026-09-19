@@ -467,41 +467,45 @@ def main() -> None:
             # while partial evidence can never enter measurement.
             _atomic_write_json(PARTIAL_FEASIBILITY_PATH, {**feasibility, "complete": False})
 
-        with attention_runtime(policy) as session:
-            session.observe_model_config(flat.model.config)
-            for cell in ordered_cells:
-                key = f"p{cell[0]}-k{cell[1]}"
-                if key in feasibility["cells"]:
-                    continue  # already completed before an interruption; skip in order
-                request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
-                record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
-                feasibility["cells"][key] = record
-                checkpoint_partial()
-                print(
-                    json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}),
-                    flush=True,
-                )
-            for request in semantic_requests():
-                if request.request_id in feasibility["semantic"]:
-                    continue  # already completed before an interruption
-                record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
-                feasibility["semantic"][request.request_id] = record
-                checkpoint_partial()
+        try:
+            with attention_runtime(policy) as session:
+                session.observe_model_config(flat.model.config)
+                for cell in ordered_cells:
+                    key = f"p{cell[0]}-k{cell[1]}"
+                    if key in feasibility["cells"]:
+                        continue  # already completed before an interruption; skip in order
+                    request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
+                    record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
+                    feasibility["cells"][key] = record
+                    checkpoint_partial()
+                    print(
+                        json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}),
+                        flush=True,
+                    )
+                for request in semantic_requests():
+                    if request.request_id in feasibility["semantic"]:
+                        continue  # already completed before an interruption
+                    record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
+                    feasibility["semantic"][request.request_id] = record
+                    checkpoint_partial()
+        finally:
+            # The typeperf child must never outlive a propagated error or an
+            # interruption; the success path stops here as well.
+            telemetry.stop()
         feasibility["complete"] = True
         _atomic_write_json(feasibility_path, feasibility)
         PARTIAL_FEASIBILITY_PATH.unlink(missing_ok=True)
-        telemetry.stop()
         provenance = {
             "action": "preflight",
             "binding": binding,
             "attention_session_evidence": session.metadata(),
             "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
             "physical_vram_bytes": physical_bytes,
+            "wddm_telemetry_coverage": telemetry.coverage(),
             "resumed_units": resumed_units,
-            "wddm_telemetry": (
-                "continuous per-PID GPU Process Memory Shared Usage via typeperf; spill = in-window peak above pre-window baseline for this process"
-                if telemetry_available
-                else "unavailable; internal reserved-beyond-physical only"
+            "wddm_telemetry_mechanism": (
+                "continuous per-PID GPU Process Memory Shared Usage via typeperf; spill = in-window peak above pre-window baseline for this process; "
+                "runtime truth is in wddm_telemetry_coverage (available, degraded_reason, windows_with_telemetry)"
             ),
         }
         # Phase-specific provenance files preserve both RuntimeSession records;

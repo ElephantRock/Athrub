@@ -553,8 +553,11 @@ def resume_partial_feasibility(
     checkpoint claims completeness (resume is only for interrupted preflights).
     """
 
-    if partial.get("complete") is True:
-        raise ValueError("checkpoint is marked complete; resume applies only to interrupted preflights")
+    if partial.get("complete") is not False:
+        raise ValueError(
+            "checkpoint missing the complete=false marker; resume applies only to "
+            "explicitly incomplete interrupted preflights"
+        )
     mismatches = verify_feasibility_binding(partial, binding)
     if mismatches:
         raise ValueError(f"checkpoint binding mismatch: {mismatches}")
@@ -623,6 +626,10 @@ class WddmSharedUsageMonitor:
         self._lock = threading.Lock()
         self._series: list[tuple[float, int]] = []
         self.available = False
+        self.startup_handshake_seconds: float | None = None
+        self.degraded_reason: str | None = None
+        self._windows_opened = 0
+        self._windows_with_telemetry = 0
 
     @staticmethod
     def parse_typeperf_header(line: str) -> list[str]:
@@ -661,6 +668,7 @@ class WddmSharedUsageMonitor:
             if not line or line.startswith(("(Exit Code", "The command completed")):
                 continue
             if "Error:" in line:
+                self.degraded_reason = f"counter error: {line[:200]}"
                 return
             if not instances:
                 header = self.parse_typeperf_header(line)
@@ -674,10 +682,19 @@ class WddmSharedUsageMonitor:
             if shared is not None:
                 with self._lock:
                     self._series.append((time.monotonic(), shared))
+        self.degraded_reason = self.degraded_reason or "typeperf stream ended"
+
         return
 
-    def start(self) -> bool:
-        """Launch the streaming sampler; returns whether telemetry is available."""
+    def start(self, handshake_timeout_seconds: float = 30.0) -> bool:
+        """Launch the sampler and wait for a valid PID-specific sample.
+
+        Availability is only declared after the bounded startup handshake
+        observes at least one counter sample attributed to this process; a
+        missing counter, missing PID instance, or immediate stream failure
+        leaves the monitor unavailable so provenance never overstates WDDM
+        coverage.
+        """
 
         try:
             self._process = subprocess.Popen(
@@ -688,13 +705,28 @@ class WddmSharedUsageMonitor:
                 encoding="utf-8",
                 errors="replace",
             )
-        except OSError:
+        except OSError as exc:
             self.available = False
+            self.degraded_reason = f"typeperf unavailable: {exc}"
             return False
         self._reader = threading.Thread(target=self._read_stream, daemon=True)
         self._reader.start()
-        self.available = True
-        return True
+        started = time.monotonic()
+        while time.monotonic() - started < handshake_timeout_seconds:
+            with self._lock:
+                if self._series:
+                    self.available = True
+                    self.startup_handshake_seconds = time.monotonic() - started
+                    return True
+            if self._process.poll() is not None:
+                break
+            time.sleep(0.5)
+        if not self.available:
+            self.degraded_reason = self.degraded_reason or (
+                f"no PID-matched sample within {handshake_timeout_seconds}s handshake"
+            )
+            self.stop()
+        return self.available
 
     def stop(self) -> None:
         if self._process is not None:
@@ -710,6 +742,7 @@ class WddmSharedUsageMonitor:
 
         if not self.available:
             return None
+        self._windows_opened += 1
         return time.monotonic()
 
     def close_window(self, start_token: float | None) -> dict[str, Any] | None:
@@ -719,6 +752,8 @@ class WddmSharedUsageMonitor:
             return None
         with self._lock:
             series = list(self._series)
+        if self._reader is not None and not self._reader.is_alive() and self.degraded_reason is None:
+            self.degraded_reason = "reader thread exited"
         baseline: int | None = None
         peak: int | None = None
         samples_in_window = 0
@@ -730,8 +765,23 @@ class WddmSharedUsageMonitor:
                 peak = shared if peak is None else max(peak, shared)
         if peak is None:
             return None
+        self._windows_with_telemetry += 1
         return {
             "peak_bytes": peak,
             "baseline_bytes": baseline if baseline is not None else 0,
             "samples_in_window": samples_in_window,
+        }
+
+    def coverage(self) -> dict[str, Any]:
+        """Runtime coverage accounting for provenance; never overstates WDDM."""
+
+        with self._lock:
+            samples = len(self._series)
+        return {
+            "available": self.available,
+            "startup_handshake_seconds": self.startup_handshake_seconds,
+            "degraded_reason": self.degraded_reason,
+            "samples": samples,
+            "windows_opened": self._windows_opened,
+            "windows_with_telemetry": self._windows_with_telemetry,
         }
