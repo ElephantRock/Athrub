@@ -630,6 +630,7 @@ class WddmSharedUsageMonitor:
         self.degraded_reason: str | None = None
         self._windows_opened = 0
         self._windows_with_telemetry = 0
+        self._stopping = False
 
     @staticmethod
     def parse_typeperf_header(line: str) -> list[str]:
@@ -682,7 +683,10 @@ class WddmSharedUsageMonitor:
             if shared is not None:
                 with self._lock:
                     self._series.append((time.monotonic(), shared))
-        self.degraded_reason = self.degraded_reason or "typeperf stream ended"
+        # A normal stop() terminates typeperf deliberately; EOF then is the
+        # expected end of a healthy stream, not telemetry degradation.
+        if not self._stopping:
+            self.degraded_reason = self.degraded_reason or "typeperf stream ended"
 
         return
 
@@ -729,13 +733,24 @@ class WddmSharedUsageMonitor:
         return self.available
 
     def stop(self) -> None:
+        """Intentionally shut down the sampler and drain the reader thread.
+
+        Marks shutdown as deliberate so the reader's EOF is not recorded as
+        degradation, then joins the reader so a subsequent coverage() call
+        observes the final series state deterministically.
+        """
+
         if self._process is not None:
+            self._stopping = True
             self._process.terminate()
             try:
                 self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._process.kill()
             self._process = None
+        if self._reader is not None and self._reader is not threading.current_thread():
+            self._reader.join(timeout=5)
+            self._reader = None
 
     def open_window(self) -> float | None:
         """Mark a probe window start; returns the monotonic timestamp token."""

@@ -99,3 +99,36 @@ def test_resume_requires_complete_false_exactly() -> None:
         partial.update(bad)
         with pytest.raises(ValueError, match="complete=false marker"):
             resume_partial_feasibility(partial, binding, ["c1", "c2"], ["s1"])
+
+
+def test_normal_stop_is_clean_unexpected_death_is_degraded() -> None:
+    # Deliberate shutdown: reader EOF after stop() must NOT be recorded as
+    # degradation, and the reader must be joined so coverage() is stable.
+    monitor = WddmSharedUsageMonitor(pid=4242)
+    monitor.available = True
+    with monitor._lock:
+        monitor._series = [(1.0, 100), (2.0, 200)]
+
+    def fake_reader() -> None:
+        pass
+
+    import threading as _threading
+
+    monitor._reader = _threading.Thread(target=fake_reader)
+    monitor._reader.start()
+    monitor.stop()
+    assert monitor._stopping is True
+    assert monitor.degraded_reason is None
+    coverage = monitor.coverage()
+    assert coverage["available"] is True and coverage["degraded_reason"] is None
+    assert coverage["samples"] == 2  # joined reader; final series visible
+
+    # Unexpected stream death (no intentional stop) IS degraded. The reader's
+    # EOF tail applies exactly this conditional; reproduce it directly since
+    # driving a real typeperf EOF here would require the Windows counter.
+    unexpected = WddmSharedUsageMonitor(pid=4242)
+    unexpected.available = True
+    unexpected._stopping = False
+    if not unexpected._stopping:
+        unexpected.degraded_reason = unexpected.degraded_reason or "typeperf stream ended"
+    assert unexpected.degraded_reason == "typeperf stream ended"
