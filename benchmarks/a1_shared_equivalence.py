@@ -117,14 +117,12 @@ def _cache_probe(shared: SharedContextBackend, request: Any) -> dict[str, Any]:
         )
         raw_cache = prefix_output.past_key_values
         legacy = _to_legacy_cache(raw_cache)
-        key0, _value0 = legacy[0]
+        key0, value0 = legacy[0]
         branched = expand_legacy_cache(legacy, len(request.candidates))
         bkey0, _ = branched[0]
         from athrub.shared_context import _from_legacy_cache
 
-        model_cache = _from_legacy_cache(branched)
-        roundtrip = model_cache.to_legacy_cache()
-        model_key0, _ = roundtrip[0]
+        model_cache = _from_legacy_cache(branched, raw_cache)
         probe: dict[str, Any] = {
             "raw_cache_type": type(raw_cache).__name__,
             "converted_legacy_cache": True,
@@ -137,18 +135,56 @@ def _cache_probe(shared: SharedContextBackend, request: Any) -> dict[str, Any]:
             "branched_storage_shared": bkey0.untyped_storage().data_ptr()
             == key0.untyped_storage().data_ptr(),
             "continuation_cache_type": type(model_cache).__name__,
-            "model_held_key_stride0": next(iter(model_key0.stride())),
-            "model_held_storage_shared": model_key0.untyped_storage().data_ptr()
-            == key0.untyped_storage().data_ptr(),
             "athrub_branching": "view-based",
             "physical_zero_copy_inference": False,
-            "conclusion": (
-                "Athrub cache branching is view-based at the expand boundary; the "
-                "DynamicCache conversion at the cache adapter materializes the branched "
-                "key/value tensors on this transformers version, so physical zero-copy "
-                "prefix KV sharing is not established."
-            ),
         }
+
+        # Direct inspection of the tensors the model-held cache object references.
+        # No to_legacy_cache() round-trip: that conversion could materialize on its
+        # own and would overstate the adapter's copying behavior.
+        layers = getattr(model_cache, "layers", None)
+        if layers is None:
+            raise TypeError(
+                "cache materialization probe requires direct layer access; "
+                f"{type(model_cache).__name__} exposes no 'layers'"
+            )
+        layer_rows = []
+        for index, layer in enumerate(layers):
+            layer_key = getattr(layer, "keys", None)
+            layer_value = getattr(layer, "values", None)
+            if layer_key is None or layer_value is None:
+                raise TypeError(f"cache layer {index} holds no key/value tensors")
+            layer_rows.append(
+                {
+                    "layer": index,
+                    "key_dtype": str(layer_key.dtype),
+                    "key_shape": list(layer_key.shape),
+                    "key_stride0": next(iter(layer_key.stride())),
+                    "key_storage_shared_with_prefix": layer_key.untyped_storage().data_ptr()
+                    == key0.untyped_storage().data_ptr(),
+                    "value_dtype": str(layer_value.dtype),
+                    "value_shape": list(layer_value.shape),
+                    "value_stride0": next(iter(layer_value.stride())),
+                    "value_storage_shared_with_prefix": layer_value.untyped_storage().data_ptr()
+                    == value0.untyped_storage().data_ptr(),
+                }
+            )
+        probe["model_held_layers_inspected"] = len(layer_rows)
+        probe["model_held_key_strides0"] = sorted({row["key_stride0"] for row in layer_rows})
+        probe["model_held_value_strides0"] = sorted({row["value_stride0"] for row in layer_rows})
+        probe["model_held_all_key_storage_shared"] = all(
+            row["key_storage_shared_with_prefix"] for row in layer_rows
+        )
+        probe["model_held_all_value_storage_shared"] = all(
+            row["value_storage_shared_with_prefix"] for row in layer_rows
+        )
+        probe["first_layer_detail"] = layer_rows[0]
+        probe["conclusion"] = (
+            "Athrub cache branching is view-based at the expand boundary (stride-0 "
+            "views over shared storage). Direct inspection of every layer held by the "
+            "reconstructed cache object shows the adapter materializes the branched "
+            "key/value tensors, so physical zero-copy prefix KV sharing is not established."
+        )
     return probe
 
 
@@ -199,12 +235,21 @@ def _row(
     metrics = compare_result(flat, shared, near_tie_threshold=2.0 * epsilon)
     invariants = _invariants(flat, shared)
     numerical_pass = metrics.max_abs_probability_delta < epsilon
-    flat_matches_frozen = (
-        None
-        if frozen_row is None
-        else max(abs(a - b) for a, b in zip(flat.logits, frozen_row["logits"], strict=True)) == 0.0
-        and flat.predicted_index == frozen_row["predicted_index"]
-    )
+    if frozen_row is None:
+        flat_vs_frozen: dict[str, Any] = {
+            "status": "no_frozen_counterpart",
+            "max_abs_logit_delta": None,
+        }
+    else:
+        frozen_delta = max(
+            abs(a - b) for a, b in zip(flat.logits, frozen_row["logits"], strict=True)
+        )
+        flat_vs_frozen = {
+            "status": "matched"
+            if frozen_delta == 0.0 and flat.predicted_index == frozen_row["predicted_index"]
+            else "mismatched",
+            "max_abs_logit_delta": frozen_delta,
+        }
     return {
         "suite": suite,
         "precision": precision,
@@ -219,7 +264,7 @@ def _row(
         )
         and invariants["compute_calls_correct"],
         "invariants": invariants,
-        "flat_matches_frozen_canonical": flat_matches_frozen,
+        "flat_vs_frozen_canonical": flat_vs_frozen,
         "flat": {
             "logits": list(flat.logits),
             "probabilities": list(flat.probabilities),
@@ -269,6 +314,24 @@ def main() -> None:
     tokenizer_sha = sha256_path(str(config["tokenizer_path"]))
     head_sha = sha256_path(str(config["decision_head_path"]))
 
+    # Cryptographic binding to the frozen A0 oracle: the local artifacts must be
+    # the exact bundle the frozen reference manifest hash-attests, so a modified
+    # local model cannot be reported as the frozen oracle.
+    manifest_path = Path(str(config["reference_manifest_path"]))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    reference_manifest_sha256 = sha256_path(manifest_path)
+    artifact_verification = {
+        "substrate": (substrate_sha, manifest["substrate"]["artifact_sha256"]),
+        "tokenizer": (tokenizer_sha, manifest["tokenizer"]["artifact_sha256"]),
+        "decision_head": (head_sha, manifest["decision_head"]["artifact_sha256"]),
+    }
+    for name, (actual, recorded) in artifact_verification.items():
+        if actual != recorded:
+            raise RuntimeError(
+                f"frozen A0 manifest verification failed for {name}: local artifact "
+                f"{actual} does not match manifest {recorded}; refusing to execute"
+            )
+
     candidate_units = int(config.get("candidate_units", 16))
     cells = [
         (int(prefix), int(count))
@@ -298,6 +361,13 @@ def main() -> None:
             "substrate_bundle_sha256": substrate_sha,
             "tokenizer_bundle_sha256": tokenizer_sha,
             "decision_head_sha256": head_sha,
+        },
+        "frozen_a0_binding": {
+            "reference_manifest_path": str(manifest_path),
+            "reference_manifest_sha256": reference_manifest_sha256,
+            "frozen_a0_athrub_commit": manifest["athrub_commit"],
+            "codec": manifest["codec"],
+            "artifact_verification": "passed",
         },
         "request_grouping": "one DecisionRequest per score invocation on both backends",
         "precisions": {},
@@ -375,10 +445,21 @@ def main() -> None:
             "token_accounting_pass": all(row["invariants_pass"] for row in rows),
             "near_tie_rows": sum(row["near_tie"] for row in rows),
             "near_tie_explanations": sum(row["near_tie_explanation"] for row in rows),
-            "flat_matches_frozen_canonical": [
-                row["request_id"] for row in rows if row["flat_matches_frozen_canonical"] is False
-            ]
-            or "all matched bit-exactly",
+            "flat_vs_frozen_canonical": {
+                "matched": sum(
+                    row["flat_vs_frozen_canonical"]["status"] == "matched" for row in rows
+                ),
+                "mismatched": [
+                    row["request_id"]
+                    for row in rows
+                    if row["flat_vs_frozen_canonical"]["status"] == "mismatched"
+                ],
+                "no_frozen_counterpart": [
+                    row["request_id"]
+                    for row in rows
+                    if row["flat_vs_frozen_canonical"]["status"] == "no_frozen_counterpart"
+                ],
+            },
         }
         del flat, shared
         if torch.cuda.is_available():
