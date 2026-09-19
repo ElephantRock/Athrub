@@ -740,8 +740,8 @@ class WddmSharedUsageMonitor:
         observes the final series state deterministically.
         """
 
+        self._stopping = True
         if self._process is not None:
-            self._stopping = True
             self._process.terminate()
             try:
                 self._process.wait(timeout=5)
