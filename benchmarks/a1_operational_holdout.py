@@ -133,6 +133,8 @@ def main() -> None:
     if manifest_sha != contract["holdout"]["manifest_sha256"]:
         raise SystemExit("raw-byte manifest sha does not match the frozen contract; refusing to execute")
 
+    if sha256_path(RUN1 / "reference_manifest.json") != contract["binding"]["reference_manifest_sha256"]:
+        raise SystemExit("reference manifest sha does not match the contract binding; refusing to execute")
     frozen_manifest = json.loads((RUN1 / "reference_manifest.json").read_text(encoding="utf-8"))
     for name, actual, recorded in (
         ("substrate", sha256_path(RUN1 / "substrate"), frozen_manifest["substrate"]["artifact_sha256"]),
@@ -325,15 +327,18 @@ def main() -> None:
         "rows_inside_ambiguity_region": inside,
         "rows_outside_ambiguity_region": len(rows) - inside,
         "argmax_flips": [row["request_id"] for row in flips],
+        # A flip is permitted only when the decision rule itself passes: inside
+        # the ambiguity radius AND B selected a candidate within F's ambiguity
+        # set. Region membership alone is not permission.
         "permitted_flips": [
             {"request_id": row["request_id"], "regret": row["oracle_decision_regret"]}
             for row in flips
-            if row["inside_ambiguity_region"]
+            if row["b_decision_rule_pass"]
         ],
         "unpermitted_flips": [
             {"request_id": row["request_id"], "regret": row["oracle_decision_regret"]}
             for row in flips
-            if not row["inside_ambiguity_region"]
+            if not row["b_decision_rule_pass"]
         ],
         "failing_rows": [row["request_id"] for row in rows if not row["b_row_pass"]],
         "shared_bf16_operational_status": "SUPPORTED"
