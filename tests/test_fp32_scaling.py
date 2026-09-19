@@ -13,10 +13,15 @@ from athrub.scaling import (
     feasibility_binding,
     flat_chunked_score,
     geometric_mean,
+    is_memory_stop_decision,
+    is_oom_exception,
     latency_percentiles,
     repeat_alternation,
+    require_complete_feasibility,
     resolve_anchor_set,
+    resume_partial_feasibility,
     shared_chunked_score,
+    stop_reason,
     suite_membership,
     verdict_thresholds,
     verify_feasibility_binding,
@@ -331,3 +336,106 @@ def test_inadmissible_anchors_excluded_from_geomean() -> None:
     ]
     speedups = [r["pair"]["speedup_candidates_per_s"] for r in rows if r.get("pair") and r.get("performance_admissible")]
     assert geometric_mean(speedups) == geometric_mean([2.5, 2.0])
+
+
+def test_is_oom_exception_classification() -> None:
+    assert is_oom_exception(torch.OutOfMemoryError("CUDA out of memory")) is True
+    accelerator = getattr(torch, "AcceleratorError", RuntimeError)
+    assert is_oom_exception(accelerator("CUDA error: out of memory")) is True
+    assert is_oom_exception(RuntimeError("cudaErrorMemoryAllocation:insufficient")) is True
+    # Non-OOM AcceleratorError/RuntimeError must propagate, not classify as OOM.
+    assert is_oom_exception(accelerator("CUDA error: device-side assert triggered")) is False
+    assert is_oom_exception(RuntimeError("shape mismatch in matmul")) is False
+    assert is_oom_exception(ValueError("out of memory")) is False
+
+
+def test_memory_stop_decision_rule() -> None:
+    assert is_memory_stop_decision({"safe": True, "status": "safe"}) is False
+    assert is_memory_stop_decision({"safe": False, "status": "unsafe"}) is True
+    assert is_memory_stop_decision({"safe": False, "status": "oom"}) is True
+    assert is_memory_stop_decision({"safe": False, "status": "not_executed_after_memory_stop"}) is False
+
+
+def test_require_complete_feasibility_rejects_partial() -> None:
+    require_complete_feasibility({"complete": True})
+    for bad in ({"complete": False}, {}, {"complete": None}):
+        with pytest.raises(ValueError, match="incomplete"):
+            require_complete_feasibility(bad)
+
+
+def test_protocol_v02_amends_v01_solely() -> None:
+    import json as _json
+    from pathlib import Path
+
+    v01 = _json.loads(Path("configs/a1_fp32_scaling.v0.1.json").read_text(encoding="utf-8"))
+    v02 = _json.loads(Path("configs/a1_fp32_scaling.v0.2.json").read_text(encoding="utf-8"))
+    assert v02["protocol_version"] == "0.2"
+    assert "memory_stop_rule" in v02["chunking"]
+    assert v02["amendment"]["sole_scientific_change"].startswith("the conservative")
+    assert v02["amendment"]["amends"] == "0.1"
+    # Everything outside protocol_version/status/amendment/memory_stop_rule identical.
+    def strip(contract):
+        clone = _json.loads(_json.dumps(contract))
+        for key in ("protocol_version", "status", "amendment"):
+            clone.pop(key, None)
+        clone["chunking"] = {k: v for k, v in clone["chunking"].items() if k != "memory_stop_rule"}
+        return clone
+    assert strip(v01) == strip(v02)
+    # The grid is untouched: 4096/8192 remain; no post-hoc pruning.
+    assert v02["grids"]["prefix_units"] == [128, 512, 1024, 2048, 4096, 8192]
+
+
+def test_chunk_safety_stop_causes_and_external_spill() -> None:
+    physical = 12 * 1024**3
+    safe = chunk_safety(int(0.5 * physical), int(0.9 * physical), physical, 0.9, 0.95)
+    assert safe["safe"] is True and safe["stop_cause"] == "none"
+    allocated = chunk_safety(int(0.95 * physical), int(0.9 * physical), physical, 0.9, 0.95)
+    assert allocated["safe"] is False and allocated["stop_cause"] == "allocated_threshold"
+    reserved = chunk_safety(int(0.5 * physical), int(0.97 * physical), physical, 0.9, 0.95)
+    assert reserved["safe"] is False and reserved["stop_cause"] == "reserved_threshold"
+    # External WDDM shared usage above baseline stops the ladder even when the
+    # internal thresholds are satisfied — this is the attempt-1 failure signal.
+    spill = chunk_safety(int(0.5 * physical), int(0.9 * physical), physical, 0.9, 0.95,
+                         external_shared_usage_bytes=16 * 1024**3, external_shared_baseline_bytes=80 * 1024**2)
+    assert spill["safe"] is False and spill["stop_cause"] == "wddm_shared_spill"
+    assert spill["spill_observed"] is True
+    # A matching baseline (desktop noise) is not a probe-attributable spill.
+    noise = chunk_safety(int(0.5 * physical), int(0.9 * physical), physical, 0.9, 0.95,
+                         external_shared_usage_bytes=80 * 1024**2, external_shared_baseline_bytes=80 * 1024**2)
+    assert noise["safe"] is True
+    beyond = chunk_safety(int(0.5 * physical), int(1.1 * physical), physical, 0.9, 0.95)
+    # Reserved beyond physical necessarily violates the 95% threshold first, so
+    # the named cause is reserved_threshold; beyond-physical is the spill flag.
+    assert beyond["stop_cause"] == "reserved_threshold"
+    assert beyond["spill_observed"] is True
+
+
+def test_stop_reason_names_concrete_cause() -> None:
+    assert stop_reason({"status": "oom", "stop_cause": "oom"}) == "oom"
+    assert stop_reason({"status": "unsafe", "stop_cause": "wddm_shared_spill"}) == "wddm_shared_spill"
+    assert stop_reason({"status": "unsafe", "stop_cause": "allocated_threshold"}) == "allocated_threshold"
+    # Legacy-shaped decisions without stop_cause degrade to status, never "unsafe" silently.
+    assert stop_reason({"status": "unsafe"}) == "unsafe"
+
+
+def test_resume_partial_feasibility_contract() -> None:
+    binding = feasibility_binding("sha-a", "sha-b", "sha-c", "sha-d", {"backend": "x"}, 12, "616.64", "2.11.0")
+    partial = {
+        "binding": dict(binding),
+        "complete": False,
+        # All grid cells complete (prefix of the full order) so the semantic
+        # row is legal under the stricter ordering contract.
+        "cells": {"p128-k2": {}, "p512-k4": {}},
+        "semantic": {"a0-route-cost-x": {"request_id": "a0-route-cost-x"}},
+    }
+    state = resume_partial_feasibility(partial, binding, ["p128-k2", "p512-k4"], ["a0-route-cost-x"])
+    assert state["resumed_units"] == 3 and "p128-k2" in state["cells"]
+    stale = {**partial, "binding": {**binding, "execution_git_sha": "other"}}
+    with pytest.raises(ValueError, match="binding mismatch"):
+        resume_partial_feasibility(stale, binding, ["p128-k2", "p512-k4"], ["a0-route-cost-x"])
+    complete = {**partial, "complete": True}
+    with pytest.raises(ValueError, match="complete=false marker"):
+        resume_partial_feasibility(complete, binding, ["p128-k2", "p512-k4"], ["a0-route-cost-x"])
+    unknown = {**partial, "cells": {"p9999-k2": {}}}
+    with pytest.raises(ValueError, match="unknown cell"):
+        resume_partial_feasibility(unknown, binding, ["p128-k2", "p512-k4"], ["a0-route-cost-x"])

@@ -16,8 +16,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import time
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -31,16 +33,24 @@ from athrub.contracts import DecisionRequest
 from athrub.provenance import sha256_path
 from athrub.reference import FlatReferenceBackend, ScalarDecisionHead
 from athrub.scaling import (
+    WddmSharedUsageMonitor,
     a2_performance_verdict,
+    aggregate_segment_coverage,
+    apply_segment_checkpoint_snapshot,
     chunk_safety,
     clip_chunk_candidates,
     deterministic_cell_order,
     feasibility_binding,
     flat_chunked_score,
+    is_memory_stop_decision,
+    is_oom_exception,
     latency_percentiles,
     repeat_alternation,
+    require_complete_feasibility,
     resolve_anchor_set,
+    resume_partial_feasibility,
     shared_chunked_score,
+    stop_reason,
     suite_membership,
     verdict_thresholds,
     verify_feasibility_binding,
@@ -49,9 +59,10 @@ from athrub.shared_context import SharedContextBackend
 from athrub.workloads import synthetic_request
 
 RUN1 = Path("artifacts/a0-reference-v0.1-run1")
-CONTRACT_PATH = Path("configs/a1_fp32_scaling.v0.1.json")
+CONTRACT_PATH = Path("configs/a1_fp32_scaling.v0.2.json")
 ISSUE11_MANIFEST = Path("experiments/a1_operational_equivalence/holdout_manifest.v0.2.jsonl")
-OUTPUT_DIR = Path("artifacts/a1-fp32-scaling-v0.1")
+OUTPUT_DIR = Path("artifacts/a1-fp32-scaling-v0.2")
+PARTIAL_FEASIBILITY_PATH = OUTPUT_DIR / "feasibility_partial.json"
 
 
 def _driver_version() -> str | None:
@@ -75,6 +86,8 @@ def _git_sha() -> str | None:
 
 def load_contract() -> dict[str, Any]:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    if contract.get("protocol_version") != "0.2" or "memory_stop_rule" not in contract.get("chunking", {}):
+        raise SystemExit("runner implements amended protocol v0.2; contract must declare it and its memory-stop rule")
     if hashlib.sha256(ISSUE11_MANIFEST.read_bytes()).hexdigest() != contract["semantic_confirmation"]["manifest_sha256"]:
         raise SystemExit("Issue #11 semantic manifest hash mismatch; refusing to execute")
     if sha256_path(RUN1 / "reference_manifest.json") != contract["binding"]["reference_manifest_sha256"]:
@@ -136,12 +149,25 @@ def grid_request(prefix: int, k: int, candidate_units: int) -> DecisionRequest:
     )
 
 
+class WddmTelemetry(WddmSharedUsageMonitor):
+    """Continuous per-PID shared-usage windows around each probe.
+
+    The base monitor streams the Windows GPU Process Memory Shared Usage
+    counter once per preflight and isolates this process's PID; probe_cell
+    opens a window before each probe and closes it after the post-forward
+    sync, capturing the in-window peak so transient spills are not missed and
+    unrelated desktop GPU activity is never attributed to the harness.
+    """
+
+
+
 def probe_cell(
     flat: FlatReferenceBackend,
     shared: SharedContextBackend,
     request: DecisionRequest,
     contract: dict[str, Any],
     physical_bytes: int,
+    telemetry: WddmTelemetry | None = None,
 ) -> dict[str, Any]:
     thresholds = contract["chunking"]["safety_thresholds"]
     candidates = clip_chunk_candidates(
@@ -154,40 +180,76 @@ def probe_cell(
         probe_only.add(255)
     records = []
     max_safe = {"flat": 0, "shared": 0}
+    # Conservative per-path memory stop (amended protocol v0.2): after a path's
+    # first memory-unsafe chunk, larger chunks for that path are declared
+    # ineligible and unexecuted rather than paged through. The operational
+    # chunk is the largest actually observed safe chunk below the stop.
+    stopped: dict[str, dict[str, Any] | None] = {"flat": None, "shared": None}
     for chunk in candidates:
         row: dict[str, Any] = {"chunk": chunk, "probe_only": chunk in probe_only}
         for path_name in ("flat", "shared"):
+            if stopped[path_name] is not None:
+                row[path_name] = {
+                    "status": "not_executed_after_memory_stop",
+                    "safe": False,
+                    "stopped_after_chunk": stopped[path_name]["chunk"],
+                    "reason": stopped[path_name]["reason"],
+                }
+                continue
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
+            window_token = telemetry.open_window() if telemetry is not None else None
             try:
                 if path_name == "flat":
                     flat_chunked_score(flat, request, chunk)
                 else:
                     shared_chunked_score(shared, request, chunk)
+                # Post-forward synchronization stays inside the protected
+                # region so asynchronous OOMs attribute to this probe.
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
+                usage = telemetry.close_window(window_token) if telemetry is not None else None
+                covered = usage is not None and usage.get("status") == "covered"
                 decision = chunk_safety(
                     int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None,
                     int(torch.cuda.max_memory_reserved()) if torch.cuda.is_available() else None,
                     physical_bytes,
                     thresholds["peak_allocated_le_fraction_of_physical_vram"],
                     thresholds["peak_reserved_le_fraction_of_physical_vram"],
+                    external_shared_usage_bytes=usage["peak_bytes"] if covered else None,
+                    external_shared_baseline_bytes=usage["baseline_bytes"] if covered else None,
                 )
+                if usage is not None:
+                    decision["wddm_window_coverage"] = usage["status"]
+                    if covered:
+                        decision["wddm_window_samples"] = usage["samples_in_window"]
+                        decision["wddm_post_window_sample_used"] = usage["post_window_sample_used"]
+                    else:
+                        # Explicit lack of WDDM observation for this probe: the
+                        # safety decision used internal signals only, and the
+                        # artifact says so rather than implying observed no-spill.
+                        decision["wddm_no_sample_waited_seconds"] = usage.get("waited_seconds")
                 decision["status"] = "safe" if decision["safe"] else "unsafe"
-            except torch.OutOfMemoryError:
-                decision = {"safe": False, "status": "oom", "spill_observed": None}
+            except (torch.OutOfMemoryError, RuntimeError) as exception:
+                # torch.AcceleratorError subclasses RuntimeError on this build.
+                # Only specifically classifiable OOMs become memory results;
+                # any other error propagates untouched.
+                if not is_oom_exception(exception):
+                    raise
+                decision = {"safe": False, "status": "oom", "spill_observed": None, "stop_cause": "oom"}
             row[path_name] = decision
             if decision["safe"] and chunk not in probe_only:
                 max_safe[path_name] = max(max_safe[path_name], chunk)
-        # The frozen probe set executes completely; intermediate OOMs are
-        # recorded per chunk and never truncate the sequence.
+            if is_memory_stop_decision(decision):
+                stopped[path_name] = {"chunk": chunk, "reason": stop_reason(decision)}
         records.append(row)
     return {
         "request_id": request.request_id,
         "max_safe_flat": max_safe["flat"],
         "max_safe_shared": max_safe["shared"],
+        "memory_stop": {name: value for name, value in stopped.items() if value is not None},
         "hardware_infeasible": records[0]["flat"]["status"] != "safe" or records[0]["shared"]["status"] != "safe",
         "probe_records": records,
     }
@@ -200,6 +262,12 @@ def _verdict_thresholds(contract: dict[str, Any]) -> dict[str, Any]:
         return verdict_thresholds(contract)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _binding_block(policy: AttentionPolicy, physical_bytes: int) -> dict[str, Any]:
@@ -378,38 +446,134 @@ def main() -> None:
     feasibility_path = OUTPUT_DIR / "feasibility.json"
 
     if args.action == "preflight":
+        ordered_cells = deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"])
+        semantic_ids = [request.request_id for request in semantic_requests()]
+        expected_cell_keys = [f"p{cell[0]}-k{cell[1]}" for cell in ordered_cells]
         feasibility: dict[str, Any] = {"binding": binding, "cells": {}, "semantic": {}}
-        with attention_runtime(policy) as session:
-            session.observe_model_config(flat.model.config)
-            for cell in deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"]):
-                request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
-                record = probe_cell(flat, shared, request, contract, physical_bytes)
-                feasibility["cells"][f"p{cell[0]}-k{cell[1]}"] = record
-                print(
-                    json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}),
-                    flush=True,
+        telemetry = WddmTelemetry()
+        telemetry_available = telemetry.start()
+        if not telemetry_available:
+            print(json.dumps({"wddm_telemetry": "unavailable; spill detection degrades to internal reserved-beyond-physical only"}), flush=True)
+        resumed_units = 0
+        prior_segments: list[dict[str, Any]] = []
+        if PARTIAL_FEASIBILITY_PATH.is_file():
+            # Resume an interrupted preflight: the checkpoint's binding must
+            # match this execution exactly, otherwise it is stale and discarded.
+            try:
+                partial_state = json.loads(PARTIAL_FEASIBILITY_PATH.read_text(encoding="utf-8"))
+                state = resume_partial_feasibility(
+                    partial_state,
+                    binding,
+                    expected_cell_keys,
+                    semantic_ids,
                 )
-            for request in semantic_requests():
-                record = probe_cell(flat, shared, request, contract, physical_bytes)
-                feasibility["semantic"][request.request_id] = record
-        feasibility_path.write_text(json.dumps(feasibility, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            except ValueError as exc:
+                print(json.dumps({"checkpoint_rejected": str(exc), "action": "fresh preflight"}), flush=True)
+            else:
+                feasibility["cells"] = state["cells"]
+                feasibility["semantic"] = state["semantic"]
+                resumed_units = state["resumed_units"]
+                loaded_segments = partial_state.get("segments")
+                if isinstance(loaded_segments, list):
+                    prior_segments = loaded_segments
+                else:
+                    prior_segments = [{
+                        "segment_id": "unknown-prior-segment",
+                        "note": "checkpoint predates segment provenance; its telemetry/session evidence is not recoverable",
+                    }]
+                print(json.dumps({"checkpoint_resumed_units": resumed_units, "prior_segments": len(prior_segments)}), flush=True)
+
+        # Segment provenance: each preflight process (fresh or resumed) records
+        # its own telemetry coverage and session evidence into the checkpoint,
+        # so final provenance describes every segment of the run, never only
+        # the continuation.
+        current_segment: dict[str, Any] = {
+            "segment_id": f"segment-{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}",
+            "execution_git_sha": binding["execution_git_sha"],
+            "resumed_units_carried_forward": resumed_units,
+            "cells_completed_this_segment": 0,
+            "semantic_completed_this_segment": 0,
+        }
+        feasibility["segments"] = [*prior_segments, current_segment]
+
+        def checkpoint_partial() -> None:
+            # Durable checkpoint after every completed unit: atomic replace,
+            # explicitly incomplete, so a crash costs at most the current cell
+            # while partial evidence can never enter measurement. The current
+            # segment's telemetry coverage AND RuntimeSession evidence are
+            # snapshotted here, so an interrupted segment's checkpoint carries
+            # both — session evidence must not depend on reaching clean exit.
+            apply_segment_checkpoint_snapshot(
+                current_segment,
+                telemetry.coverage(),
+                session_holder["session"].metadata() if session_holder["session"] is not None else None,
+            )
+            _atomic_write_json(PARTIAL_FEASIBILITY_PATH, {**feasibility, "complete": False})
+
+        session_holder: dict[str, Any] = {"session": None}
+        try:
+            with attention_runtime(policy) as session:
+                session_holder["session"] = session
+                session.observe_model_config(flat.model.config)
+                for cell in ordered_cells:
+                    key = f"p{cell[0]}-k{cell[1]}"
+                    if key in feasibility["cells"]:
+                        continue  # already completed before an interruption; skip in order
+                    request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
+                    record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
+                    feasibility["cells"][key] = record
+                    current_segment["cells_completed_this_segment"] += 1
+                    checkpoint_partial()
+                    print(
+                        json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}),
+                        flush=True,
+                    )
+                for request in semantic_requests():
+                    if request.request_id in feasibility["semantic"]:
+                        continue  # already completed before an interruption
+                    record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
+                    feasibility["semantic"][request.request_id] = record
+                    current_segment["semantic_completed_this_segment"] += 1
+                    checkpoint_partial()
+                current_segment["attention_session_evidence"] = session.metadata()
+        finally:
+            session_holder["session"] = None
+            # The typeperf child must never outlive a propagated error or an
+            # interruption; the success path stops here as well.
+            telemetry.stop()
+        feasibility["complete"] = True
+        _atomic_write_json(feasibility_path, feasibility)
+        PARTIAL_FEASIBILITY_PATH.unlink(missing_ok=True)
+        current_segment["wddm_telemetry_coverage"] = telemetry.coverage()
         provenance = {
             "action": "preflight",
             "binding": binding,
-            "attention_session_evidence": session.metadata(),
+            "attention_session_evidence": current_segment.get("attention_session_evidence", session.metadata()),
             "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
             "physical_vram_bytes": physical_bytes,
+            "wddm_telemetry_coverage": telemetry.coverage(),
+            "resumed_units": resumed_units,
+            "segments": feasibility["segments"],
+            "wddm_telemetry_coverage_aggregate": aggregate_segment_coverage(feasibility["segments"]),
+            "wddm_telemetry_mechanism": (
+                "continuous per-PID GPU Process Memory Shared Usage via typeperf; spill = in-window peak above pre-window baseline for this process; "
+                "runtime truth is wddm_telemetry_coverage (this segment) and wddm_telemetry_coverage_aggregate (all segments)"
+            ),
         }
         # Phase-specific provenance files preserve both RuntimeSession records;
         # measure never overwrites the preflight evidence.
         (OUTPUT_DIR / "provenance_preflight.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"])}, indent=2))
+        print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"]), "resumed_units": resumed_units, "segments": len(feasibility["segments"])}, indent=2))
         return
 
     # measure: re-verify the preflight binding before trusting any of it.
     if not feasibility_path.is_file():
         raise SystemExit("measure requires a completed preflight (feasibility.json) first")
     feasibility = json.loads(feasibility_path.read_text(encoding="utf-8"))
+    try:
+        require_complete_feasibility(feasibility)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     mismatches = verify_feasibility_binding(feasibility, binding)
     if mismatches:
         raise SystemExit(f"stale or mismatched preflight evidence: {mismatches}; rerun preflight")
