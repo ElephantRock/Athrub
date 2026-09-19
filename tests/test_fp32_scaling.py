@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 import torch
 from tests.test_shared_context import (
@@ -190,7 +188,7 @@ def test_a2_verdict_gates() -> None:
     }
     disabled = a2_performance_verdict([2.5, 2.5, 2.5], 3, **common)
     assert disabled["a2_performance_verdict"].startswith("disabled_")
-    assert "anchor_minimum_met: False" in json.dumps(disabled["gates"])
+    assert disabled["gates"]["anchor_minimum_met"] is False
 
     correctness_failed = a2_performance_verdict([2.5] * 4, 4, **{**common, "correctness_all_pass": False})
     assert correctness_failed["band"] == "strong"
