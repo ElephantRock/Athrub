@@ -438,3 +438,55 @@ def verdict_thresholds(contract: dict[str, Any]) -> dict[str, Any]:
     if derived["conditional"] >= derived["strong"]:
         raise ValueError(f"conditional band must sit below the strong band: {derived}")
     return derived
+
+
+_OOM_TEXT_MARKERS = (
+    "out of memory",
+    "out-of-memory",
+    "cudaerrormemoryallocation",
+    "insufficient memory",
+)
+
+
+def is_oom_exception(exception: BaseException) -> bool:
+    """Classify an exception as out-of-memory, strictly.
+
+    torch.OutOfMemoryError is always OOM. torch.AcceleratorError and
+    RuntimeError qualify only when their message is specifically memory
+    related; any other AcceleratorError/RuntimeError must propagate rather
+    than being silently recorded as a memory result.
+    """
+
+    if isinstance(exception, torch.OutOfMemoryError):
+        return True
+    accelerator_error = getattr(torch, "AcceleratorError", None)
+    is_candidate = isinstance(exception, RuntimeError) or (
+        accelerator_error is not None and isinstance(exception, accelerator_error)
+    )
+    if not is_candidate:
+        return False
+    text = str(exception).lower()
+    return any(marker in text for marker in _OOM_TEXT_MARKERS)
+
+
+def is_memory_stop_decision(decision: dict[str, Any]) -> bool:
+    """True when a probe decision ends the (conservative) per-path ladder.
+
+    Unsafe-by-thresholds, spill, and OOM all stop the ladder; explicitly
+    recorded not-executed rows and safe rows do not.
+    """
+
+    status = decision.get("status")
+    if status in {"oom"}:
+        return True
+    return bool(decision.get("safe")) is False and status in {"unsafe"}
+
+
+def require_complete_feasibility(record: dict[str, Any]) -> None:
+    """Reject any feasibility artifact not marked complete by a full preflight."""
+
+    if record.get("complete") is not True:
+        raise ValueError(
+            "feasibility artifact is incomplete (complete != true); "
+            "partial preflight evidence is categorically inadmissible for measurement"
+        )

@@ -1,14 +1,18 @@
-# A1 FP32 shared-context scaling plan (Issue #15, protocol v0.1)
+# A1 FP32 shared-context scaling plan (Issue #15)
 
-Frozen **before** any GPU execution. The machine-readable authoritative copy of
-every constant is `configs/a1_fp32_scaling.v0.1.json`; this document is its
-human-readable record. This campaign is the narrower FP32-only follow-up to the
-Issue #11 disposition; Issue #3 retains the original FP32+BF16 scope
-historically unchanged. BF16 is explicitly out of scope: plain shared BF16 is
-UNSUPPORTED on this runtime under contract v0.2, and this plan measures only
-the numerically validated FP32 shared-context path.
+**Authoritative contract for preflight execution: `configs/a1_fp32_scaling.v0.2.json`
+(protocol v0.2, the amended protocol). Protocol v0.1
+(`configs/a1_fp32_scaling.v0.1.json`) is preserved unchanged and remains the
+historical record for preflight attempt 1.**
 
-**Freeze status: fully frozen (all P0 review items transcribed verbatim).**
+Frozen **before** any GPU execution. This campaign is the narrower FP32-only
+follow-up to the Issue #11 disposition; Issue #3 retains the original FP32+BF16
+scope historically unchanged. BF16 is explicitly out of scope: plain shared
+BF16 is UNSUPPORTED on this runtime under its contract v0.2, and this plan
+measures only the numerically validated FP32 shared-context path.
+
+**Freeze status: fully frozen (all P0 review items transcribed verbatim);
+amended once as v0.2 per the section below.**
 
 ## Binding
 
@@ -207,3 +211,50 @@ conditional A2 performance verdicts**, regardless of the geometric mean.
 No GPU preflight has been run. P1 (harness implementation), the resource
 preflight, and any performance execution remain blocked pending final freeze
 review.
+
+## Protocol amendment v0.2 (preflight memory-stop)
+
+Preflight attempt 1 under v0.1 ran 3h50m from clean main, completed 10/48 grid
+cells, and crashed on an uncaught `torch.AcceleratorError` CUDA OOM
+(evidence preserved at `artifacts/a15-preflight-crash1/`); under WDDM, unsafe
+FP32 probes page for tens of minutes rather than failing fast, so the v0.1
+complete-ladder rule made the matrix a multi-hour run that evaporated on the
+crash. The attempt is engineering evidence, not an admissible preflight
+result: it did not complete and produced no bound feasibility artifact.
+
+The v0.2 amendment (`configs/a1_fp32_scaling.v0.2.json`) makes exactly one
+scientific change and two reliability changes:
+
+**Sole scientific change — conservative per-path chunk-ladder memory stop.**
+Chunks probe in ascending order. After a path's first memory-unsafe chunk (OOM,
+observed WDDM/shared-memory spill, or violation of the frozen allocated/
+reserved limits), larger chunks for that path are **not executed**: they are
+recorded as `not_executed_after_memory_stop` with the stopping chunk and
+reason, and declared ineligible and unexecuted — not claimed unsafe by
+measurement. The operational chunk is the largest actually observed `safe`
+chunk below the stop. Memory behavior is not mathematically guaranteed
+monotone across CUDA kernel heuristics; the rule is therefore explicitly
+conservative and can only select a smaller operational chunk than theoretically
+possible, making the eventual performance result more conservative. The chunk-1
+`hardware_infeasible` rule is unchanged. For K=255, the probe-only full-K run
+is recorded as not-executed when the path has already memory-stopped below it,
+rather than forced through paging.
+
+**Reliability changes (no experiment-semantics effect).**
+1. OOM classification: `torch.OutOfMemoryError` plus `torch.AcceleratorError`
+   and `RuntimeError` *only* when specifically classifiable as out-of-memory
+   from the exception text; any non-OOM error propagates untouched. The
+   post-forward CUDA synchronization stays inside the protected probe region
+   so asynchronous OOMs attribute to the correct probe.
+2. Durable checkpointing: after every completed grid cell and semantic request,
+   the preflight atomically persists `feasibility_partial.json` carrying the
+   full binding and `complete: false`. `measure` categorically rejects any
+   artifact not marked `complete: true`; only a fully successful preflight
+   emits the canonical `feasibility.json`. Another crash costs at most the
+   current cell.
+
+**Unchanged from v0.1:** grids (including 4096 and 8192 prefixes — the amended
+preflight classifies them formally; the partial attempt-1 console evidence is
+not used to prune the grid post hoc), anchor suite and substitution rule,
+attribution paths, cadences, correctness gate, semantic confirmation set,
+safety thresholds, execution order, metrics, and A2 interpretation.

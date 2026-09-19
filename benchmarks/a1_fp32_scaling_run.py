@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import time
 from dataclasses import asdict
@@ -37,8 +38,11 @@ from athrub.scaling import (
     deterministic_cell_order,
     feasibility_binding,
     flat_chunked_score,
+    is_memory_stop_decision,
+    is_oom_exception,
     latency_percentiles,
     repeat_alternation,
+    require_complete_feasibility,
     resolve_anchor_set,
     shared_chunked_score,
     suite_membership,
@@ -49,9 +53,10 @@ from athrub.shared_context import SharedContextBackend
 from athrub.workloads import synthetic_request
 
 RUN1 = Path("artifacts/a0-reference-v0.1-run1")
-CONTRACT_PATH = Path("configs/a1_fp32_scaling.v0.1.json")
+CONTRACT_PATH = Path("configs/a1_fp32_scaling.v0.2.json")
 ISSUE11_MANIFEST = Path("experiments/a1_operational_equivalence/holdout_manifest.v0.2.jsonl")
-OUTPUT_DIR = Path("artifacts/a1-fp32-scaling-v0.1")
+OUTPUT_DIR = Path("artifacts/a1-fp32-scaling-v0.2")
+PARTIAL_FEASIBILITY_PATH = OUTPUT_DIR / "feasibility_partial.json"
 
 
 def _driver_version() -> str | None:
@@ -75,6 +80,8 @@ def _git_sha() -> str | None:
 
 def load_contract() -> dict[str, Any]:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    if contract.get("protocol_version") != "0.2" or "memory_stop_rule" not in contract.get("chunking", {}):
+        raise SystemExit("runner implements amended protocol v0.2; contract must declare it and its memory-stop rule")
     if hashlib.sha256(ISSUE11_MANIFEST.read_bytes()).hexdigest() != contract["semantic_confirmation"]["manifest_sha256"]:
         raise SystemExit("Issue #11 semantic manifest hash mismatch; refusing to execute")
     if sha256_path(RUN1 / "reference_manifest.json") != contract["binding"]["reference_manifest_sha256"]:
@@ -154,9 +161,22 @@ def probe_cell(
         probe_only.add(255)
     records = []
     max_safe = {"flat": 0, "shared": 0}
+    # Conservative per-path memory stop (amended protocol v0.2): after a path's
+    # first memory-unsafe chunk, larger chunks for that path are declared
+    # ineligible and unexecuted rather than paged through. The operational
+    # chunk is the largest actually observed safe chunk below the stop.
+    stopped: dict[str, dict[str, Any] | None] = {"flat": None, "shared": None}
     for chunk in candidates:
         row: dict[str, Any] = {"chunk": chunk, "probe_only": chunk in probe_only}
         for path_name in ("flat", "shared"):
+            if stopped[path_name] is not None:
+                row[path_name] = {
+                    "status": "not_executed_after_memory_stop",
+                    "safe": False,
+                    "stopped_after_chunk": stopped[path_name]["chunk"],
+                    "reason": stopped[path_name]["reason"],
+                }
+                continue
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
@@ -166,6 +186,8 @@ def probe_cell(
                     flat_chunked_score(flat, request, chunk)
                 else:
                     shared_chunked_score(shared, request, chunk)
+                # Post-forward synchronization stays inside the protected
+                # region so asynchronous OOMs attribute to this probe.
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 decision = chunk_safety(
@@ -176,18 +198,24 @@ def probe_cell(
                     thresholds["peak_reserved_le_fraction_of_physical_vram"],
                 )
                 decision["status"] = "safe" if decision["safe"] else "unsafe"
-            except torch.OutOfMemoryError:
+            except (torch.OutOfMemoryError, RuntimeError) as exception:
+                # torch.AcceleratorError subclasses RuntimeError on this build.
+                # Only specifically classifiable OOMs become memory results;
+                # any other error propagates untouched.
+                if not is_oom_exception(exception):
+                    raise
                 decision = {"safe": False, "status": "oom", "spill_observed": None}
             row[path_name] = decision
             if decision["safe"] and chunk not in probe_only:
                 max_safe[path_name] = max(max_safe[path_name], chunk)
-        # The frozen probe set executes completely; intermediate OOMs are
-        # recorded per chunk and never truncate the sequence.
+            if is_memory_stop_decision(decision):
+                stopped[path_name] = {"chunk": chunk, "reason": str(decision["status"])}
         records.append(row)
     return {
         "request_id": request.request_id,
         "max_safe_flat": max_safe["flat"],
         "max_safe_shared": max_safe["shared"],
+        "memory_stop": {name: value for name, value in stopped.items() if value is not None},
         "hardware_infeasible": records[0]["flat"]["status"] != "safe" or records[0]["shared"]["status"] != "safe",
         "probe_records": records,
     }
@@ -200,6 +228,12 @@ def _verdict_thresholds(contract: dict[str, Any]) -> dict[str, Any]:
         return verdict_thresholds(contract)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _binding_block(policy: AttentionPolicy, physical_bytes: int) -> dict[str, Any]:
@@ -379,12 +413,20 @@ def main() -> None:
 
     if args.action == "preflight":
         feasibility: dict[str, Any] = {"binding": binding, "cells": {}, "semantic": {}}
+
+        def checkpoint_partial() -> None:
+            # Durable checkpoint after every completed unit: atomic replace,
+            # explicitly incomplete, so a crash costs at most the current cell
+            # while partial evidence can never enter measurement.
+            _atomic_write_json(PARTIAL_FEASIBILITY_PATH, {**feasibility, "complete": False})
+
         with attention_runtime(policy) as session:
             session.observe_model_config(flat.model.config)
             for cell in deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"]):
                 request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
                 record = probe_cell(flat, shared, request, contract, physical_bytes)
                 feasibility["cells"][f"p{cell[0]}-k{cell[1]}"] = record
+                checkpoint_partial()
                 print(
                     json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}),
                     flush=True,
@@ -392,7 +434,10 @@ def main() -> None:
             for request in semantic_requests():
                 record = probe_cell(flat, shared, request, contract, physical_bytes)
                 feasibility["semantic"][request.request_id] = record
-        feasibility_path.write_text(json.dumps(feasibility, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                checkpoint_partial()
+        feasibility["complete"] = True
+        _atomic_write_json(feasibility_path, feasibility)
+        PARTIAL_FEASIBILITY_PATH.unlink(missing_ok=True)
         provenance = {
             "action": "preflight",
             "binding": binding,
@@ -410,6 +455,10 @@ def main() -> None:
     if not feasibility_path.is_file():
         raise SystemExit("measure requires a completed preflight (feasibility.json) first")
     feasibility = json.loads(feasibility_path.read_text(encoding="utf-8"))
+    try:
+        require_complete_feasibility(feasibility)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     mismatches = verify_feasibility_binding(feasibility, binding)
     if mismatches:
         raise SystemExit(f"stale or mismatched preflight evidence: {mismatches}; rerun preflight")

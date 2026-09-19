@@ -13,8 +13,11 @@ from athrub.scaling import (
     feasibility_binding,
     flat_chunked_score,
     geometric_mean,
+    is_memory_stop_decision,
+    is_oom_exception,
     latency_percentiles,
     repeat_alternation,
+    require_complete_feasibility,
     resolve_anchor_set,
     shared_chunked_score,
     suite_membership,
@@ -331,3 +334,50 @@ def test_inadmissible_anchors_excluded_from_geomean() -> None:
     ]
     speedups = [r["pair"]["speedup_candidates_per_s"] for r in rows if r.get("pair") and r.get("performance_admissible")]
     assert geometric_mean(speedups) == geometric_mean([2.5, 2.0])
+
+
+def test_is_oom_exception_classification() -> None:
+    assert is_oom_exception(torch.OutOfMemoryError("CUDA out of memory")) is True
+    accelerator = getattr(torch, "AcceleratorError", RuntimeError)
+    assert is_oom_exception(accelerator("CUDA error: out of memory")) is True
+    assert is_oom_exception(RuntimeError("cudaErrorMemoryAllocation:insufficient")) is True
+    # Non-OOM AcceleratorError/RuntimeError must propagate, not classify as OOM.
+    assert is_oom_exception(accelerator("CUDA error: device-side assert triggered")) is False
+    assert is_oom_exception(RuntimeError("shape mismatch in matmul")) is False
+    assert is_oom_exception(ValueError("out of memory")) is False
+
+
+def test_memory_stop_decision_rule() -> None:
+    assert is_memory_stop_decision({"safe": True, "status": "safe"}) is False
+    assert is_memory_stop_decision({"safe": False, "status": "unsafe"}) is True
+    assert is_memory_stop_decision({"safe": False, "status": "oom"}) is True
+    assert is_memory_stop_decision({"safe": False, "status": "not_executed_after_memory_stop"}) is False
+
+
+def test_require_complete_feasibility_rejects_partial() -> None:
+    require_complete_feasibility({"complete": True})
+    for bad in ({"complete": False}, {}, {"complete": None}):
+        with pytest.raises(ValueError, match="incomplete"):
+            require_complete_feasibility(bad)
+
+
+def test_protocol_v02_amends_v01_solely() -> None:
+    import json as _json
+    from pathlib import Path
+
+    v01 = _json.loads(Path("configs/a1_fp32_scaling.v0.1.json").read_text(encoding="utf-8"))
+    v02 = _json.loads(Path("configs/a1_fp32_scaling.v0.2.json").read_text(encoding="utf-8"))
+    assert v02["protocol_version"] == "0.2"
+    assert "memory_stop_rule" in v02["chunking"]
+    assert v02["amendment"]["sole_scientific_change"].startswith("the conservative")
+    assert v02["amendment"]["amends"] == "0.1"
+    # Everything outside protocol_version/status/amendment/memory_stop_rule identical.
+    def strip(contract):
+        clone = _json.loads(_json.dumps(contract))
+        for key in ("protocol_version", "status", "amendment"):
+            clone.pop(key, None)
+        clone["chunking"] = {k: v for k, v in clone["chunking"].items() if k != "memory_stop_rule"}
+        return clone
+    assert strip(v01) == strip(v02)
+    # The grid is untouched: 4096/8192 remain; no post-hoc pruning.
+    assert v02["grids"]["prefix_units"] == [128, 512, 1024, 2048, 4096, 8192]
