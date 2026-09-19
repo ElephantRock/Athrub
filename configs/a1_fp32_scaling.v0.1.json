@@ -1,7 +1,7 @@
 {
   "campaign": "A1 FP32 shared-context scaling (Issue #15)",
   "protocol_version": "0.1",
-  "status": "frozen-before-gpu",
+  "status": "frozen-before-gpu-pending-anchor-transcription",
   "precision": "fp32",
   "bf16": "explicitly out of scope (Issue #11 disposition: plain shared BF16 UNSUPPORTED on this runtime)",
   "binding": {
@@ -21,17 +21,41 @@
   },
   "attribution": {
     "prefix_units": [128, 512, 1024],
-    "candidate_counts": [2, 8, 32]
+    "candidate_counts": [2, 8, 32],
+    "paths": ["flat-sequential", "flat-batched", "shared-sequential", "shared-batched"],
+    "batched_chunk_size": "min(max_safe_flat, max_safe_shared, K), established by the feasibility probe per cell"
+  },
+  "chunking": {
+    "feasibility_chunk_candidates": [1, 2, 4, 8, 16, 32, 64, 128],
+    "full_K_probe_for_K_255": true,
+    "safety_thresholds": {
+      "peak_allocated_le_fraction_of_physical_vram": 0.9,
+      "peak_reserved_le_fraction_of_physical_vram": 0.95,
+      "no_oom_or_error": true,
+      "no_observed_wddm_shared_memory_spill": true
+    },
+    "primary_comparison_chunk_policy": "each path may use its own largest safe chunk",
+    "shared_chunking_semantics": "prefix computed exactly once per request and reused across all continuation chunks; candidate logits restored to original candidate order; softmax applied once over the full K-candidate set"
   },
   "cadence": {
     "primary": { "warmups": 3, "repeats": 10 },
-    "anchor": { "warmups": 10, "repeats": 50 }
+    "anchor": { "warmups": 10, "repeats": 50 },
+    "semantic": { "warmups": 5, "repeats": 20 }
+  },
+  "execution_order": {
+    "cell_order_seed": 271828,
+    "path_order": "alternating flat/shared execution order"
   },
   "correctness_gate": {
     "comparison": "candidate_path_vs_reference_flat",
     "max_abs_probability_delta_lt": 1e-05,
     "argmax_exact": true,
-    "scope": "attribution cells and anchor suite, fp32"
+    "scope": "every feasible measured cell; performance from a path is admissible only if it preserves FP32 equivalence on that cell"
+  },
+  "semantic_confirmation": {
+    "source": "the frozen Issue #11 holdout manifest",
+    "manifest_sha256": "b7945ef0edc5b2e7d3c71d27bae0c46647dcce02ff612f5620d887bf81761632",
+    "selection": "exactly the 24 records with metadata.suite == 'semantic' (they follow the 18 synthetic rows)"
   },
   "primary_comparison": "optimized/chunked flat vs chunked shared",
   "metrics": [
@@ -40,10 +64,9 @@
     "logical token positions (flat and shared accounting)",
     "prefix/continuation stage latencies for shared paths"
   ],
-  "review_required_before_p1": [
-    "anchor suite cell list (Issue #15 protocol text)",
-    "chunking specification for optimized/chunked flat and chunked shared",
-    "attribution matrix execution-path set (per Phase 1 four-path definition)",
-    "infeasible-cell rule for the 8192-prefix FP32 regime (WDDM spill boundary)"
+  "pending_transcription_from_issue_15": [
+    "the six exact anchor cells and the substitution rule",
+    "the full required metric set beyond the four listed above",
+    "the A2 interpretation rules"
   ]
 }
