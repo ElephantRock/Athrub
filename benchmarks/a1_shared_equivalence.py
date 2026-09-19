@@ -117,9 +117,7 @@ def _cache_probe(shared: SharedContextBackend, request: Any) -> dict[str, Any]:
         )
         raw_cache = prefix_output.past_key_values
         legacy = _to_legacy_cache(raw_cache)
-        key0, value0 = legacy[0]
         branched = expand_legacy_cache(legacy, len(request.candidates))
-        bkey0, _ = branched[0]
         from athrub.shared_context import _from_legacy_cache
 
         model_cache = _from_legacy_cache(branched, raw_cache)
@@ -127,13 +125,6 @@ def _cache_probe(shared: SharedContextBackend, request: Any) -> dict[str, Any]:
             "raw_cache_type": type(raw_cache).__name__,
             "converted_legacy_cache": True,
             "cache_layers": len(legacy),
-            "key_source_shape": list(key0.shape),
-            "key_branched_shape": list(bkey0.shape),
-            "source_batch_dimension": int(key0.shape[0]),
-            "branched_batch_dimension": int(bkey0.shape[0]),
-            "branched_stride0": next(iter(bkey0.stride())),
-            "branched_storage_shared": bkey0.untyped_storage().data_ptr()
-            == key0.untyped_storage().data_ptr(),
             "continuation_cache_type": type(model_cache).__name__,
             "athrub_branching": "view-based",
             "physical_zero_copy_inference": False,
@@ -141,15 +132,24 @@ def _cache_probe(shared: SharedContextBackend, request: Any) -> dict[str, Any]:
 
         # Direct inspection of the tensors the model-held cache object references.
         # No to_legacy_cache() round-trip: that conversion could materialize on its
-        # own and would overstate the adapter's copying behavior.
+        # own and would overstate the adapter's copying behavior. Every layer is
+        # compared against the source and branched tensors of the SAME layer, so
+        # the chain source_i -> stride-0 branch_i -> reconstructed cache_i holds
+        # per layer rather than only for layer 0.
         layers = getattr(model_cache, "layers", None)
         if layers is None:
             raise TypeError(
                 "cache materialization probe requires direct layer access; "
                 f"{type(model_cache).__name__} exposes no 'layers'"
             )
+        if len(layers) != len(legacy):
+            raise ValueError(
+                f"cache layer count mismatch: model-held {len(layers)} vs source {len(legacy)}"
+            )
         layer_rows = []
         for index, layer in enumerate(layers):
+            source_key, source_value = legacy[index]
+            branched_key, branched_value = branched[index]
             layer_key = getattr(layer, "keys", None)
             layer_value = getattr(layer, "values", None)
             if layer_key is None or layer_value is None:
@@ -158,32 +158,56 @@ def _cache_probe(shared: SharedContextBackend, request: Any) -> dict[str, Any]:
                 {
                     "layer": index,
                     "key_dtype": str(layer_key.dtype),
-                    "key_shape": list(layer_key.shape),
-                    "key_stride0": next(iter(layer_key.stride())),
-                    "key_storage_shared_with_prefix": layer_key.untyped_storage().data_ptr()
-                    == key0.untyped_storage().data_ptr(),
+                    "source_key_shape": list(source_key.shape),
+                    "branched_key_shape": list(branched_key.shape),
+                    "branched_key_stride0": next(iter(branched_key.stride())),
+                    "branched_key_storage_shared_with_source": branched_key.untyped_storage().data_ptr()
+                    == source_key.untyped_storage().data_ptr(),
                     "value_dtype": str(layer_value.dtype),
-                    "value_shape": list(layer_value.shape),
-                    "value_stride0": next(iter(layer_value.stride())),
-                    "value_storage_shared_with_prefix": layer_value.untyped_storage().data_ptr()
-                    == value0.untyped_storage().data_ptr(),
+                    "source_value_shape": list(source_value.shape),
+                    "branched_value_shape": list(branched_value.shape),
+                    "branched_value_stride0": next(iter(branched_value.stride())),
+                    "branched_value_storage_shared_with_source": branched_value.untyped_storage().data_ptr()
+                    == source_value.untyped_storage().data_ptr(),
+                    "model_held_key_stride0": next(iter(layer_key.stride())),
+                    "model_held_key_storage_shared_with_branched": layer_key.untyped_storage().data_ptr()
+                    == branched_key.untyped_storage().data_ptr(),
+                    "model_held_value_stride0": next(iter(layer_value.stride())),
+                    "model_held_value_storage_shared_with_branched": layer_value.untyped_storage().data_ptr()
+                    == branched_value.untyped_storage().data_ptr(),
                 }
             )
         probe["model_held_layers_inspected"] = len(layer_rows)
-        probe["model_held_key_strides0"] = sorted({row["key_stride0"] for row in layer_rows})
-        probe["model_held_value_strides0"] = sorted({row["value_stride0"] for row in layer_rows})
-        probe["model_held_all_key_storage_shared"] = all(
-            row["key_storage_shared_with_prefix"] for row in layer_rows
+        probe["branched_all_key_storage_shared_with_source"] = all(
+            row["branched_key_storage_shared_with_source"] for row in layer_rows
         )
-        probe["model_held_all_value_storage_shared"] = all(
-            row["value_storage_shared_with_prefix"] for row in layer_rows
+        probe["branched_all_value_storage_shared_with_source"] = all(
+            row["branched_value_storage_shared_with_source"] for row in layer_rows
+        )
+        probe["branched_key_strides0"] = sorted({row["branched_key_stride0"] for row in layer_rows})
+        probe["branched_value_strides0"] = sorted(
+            {row["branched_value_stride0"] for row in layer_rows}
+        )
+        probe["model_held_key_strides0"] = sorted(
+            {row["model_held_key_stride0"] for row in layer_rows}
+        )
+        probe["model_held_value_strides0"] = sorted(
+            {row["model_held_value_stride0"] for row in layer_rows}
+        )
+        probe["model_held_all_key_storage_shared_with_branched"] = all(
+            row["model_held_key_storage_shared_with_branched"] for row in layer_rows
+        )
+        probe["model_held_all_value_storage_shared_with_branched"] = all(
+            row["model_held_value_storage_shared_with_branched"] for row in layer_rows
         )
         probe["first_layer_detail"] = layer_rows[0]
         probe["conclusion"] = (
-            "Athrub cache branching is view-based at the expand boundary (stride-0 "
-            "views over shared storage). Direct inspection of every layer held by the "
-            "reconstructed cache object shows the adapter materializes the branched "
-            "key/value tensors, so physical zero-copy prefix KV sharing is not established."
+            "Per layer, the source cache branches into stride-0 views over shared "
+            "storage (Athrub branching is view-based), and the reconstructed cache "
+            "object holds materialized key/value tensors with storage distinct from "
+            "both the source and the branched views. The adapter therefore copies at "
+            "the cache reconstruction boundary on this transformers version, and "
+            "physical zero-copy prefix KV sharing is not established."
         )
     return probe
 
