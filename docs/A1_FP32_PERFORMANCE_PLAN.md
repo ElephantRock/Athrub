@@ -8,9 +8,7 @@ historically unchanged. BF16 is explicitly out of scope: plain shared BF16 is
 UNSUPPORTED on this runtime under contract v0.2, and this plan measures only
 the numerically validated FP32 shared-context path.
 
-**Freeze status: amended after P0 review; three items remain pending literal
-transcription from the Issue #15 review (anchor cells + substitution rule,
-full metric set, A2 interpretation rules) — see the final section.**
+**Freeze status: fully frozen (all P0 review items transcribed verbatim).**
 
 ## Binding
 
@@ -82,6 +80,24 @@ anchor suite      10 warmups / 50 repeats
 semantic suite    5 warmups / 20 repeats
 ```
 
+## Anchor suite and substitution rule
+
+```text
+(p512, K32)   (p512, K128)
+(p1024, K16)  (p1024, K64)
+(p2048, K16)  (p2048, K64)
+```
+
+Substitution rule (verbatim from the Issue #15 review):
+
+- If an anchor is resource-infeasible, substitute the largest lower K from the
+  frozen K grid at the same prefix, chosen only from the resource preflight
+  before timing.
+- Do not duplicate an already-selected anchor at that prefix; step down again.
+- If no unique lower-K substitute exists, mark that anchor unavailable.
+- If fewer than 4 unique anchors remain feasible, the campaign may report
+  measurements but may not issue a strong/conditional A2 performance verdict.
+
 ## Semantic confirmation suite
 
 Uses the already-frozen Issue #11 holdout manifest
@@ -115,23 +131,69 @@ Reference flat and unchunked shared remain diagnostic context.
 
 ## Metrics and artifacts
 
-Per invocation: latency, peak allocated/reserved CUDA bytes, logical token
-position accounting (flat and shared), shared-path stage latencies. Artifacts
-follow the established pattern: provenance (execution git SHA, raw manifest
-hashes, frozen A0 binding, environment, effective attention policy), per-cell
-JSONL with full measurement records, feasibility-probe records, and a summary.
-Nothing in this campaign may be quoted as an A1 correctness result, and BF16
-rows do not exist.
+Authoritative metric set (verbatim from the Issue #15 review):
 
-## Pending literal transcription from the Issue #15 review
+```text
+latency:            p50, p90, p95, p99, mean
+throughput:         requests/s, candidates/s, speedup
+token/work:         exact tokenizer counts; flat logical token positions;
+                    shared logical token positions; logical-reduction ratio
+timing:             prefix timing where available; continuation timing where
+                    available; model timing where available
+memory/execution:   peak allocated VRAM; peak reserved VRAM; chunk size;
+                    model-call counts
+correctness:        max/mean absolute logit delta; max/mean absolute
+                    probability delta; total variation; KL divergence;
+                    argmax agreement
+provenance:         Athrub execution commit; frozen A0 binding/hashes;
+                    effective attention policy; environment; hardware;
+                    driver/CUDA; PyTorch
+```
 
-The following were ratified and posted to Issue #15 but their exact values have
-not yet been transmitted to the local assistant; the freeze is incomplete
-without them and they must be transcribed verbatim before P1:
+Required interpretation clause:
 
-1. The six exact anchor cells and the substitution rule.
-2. The full required metric set (beyond the four listed above).
-3. The A2 interpretation rules.
+```text
+Logical token-position reduction is theoretical accounting, not measured FLOPs.
+```
+
+Artifacts follow the established pattern: provenance (execution git SHA, raw
+manifest hashes, frozen A0 binding, environment, effective attention policy),
+per-cell JSONL with full measurement records, feasibility-probe records, and a
+summary. Nothing in this campaign may be quoted as an A1 correctness result,
+and BF16 rows do not exist.
+
+## A2 interpretation rules (verbatim from the Issue #15 review)
+
+Historical Phase-1 gate:
+
+```text
+correctness
+AND
+(
+    >= 2x effective throughput
+    OR
+    >= 50% independently measured computational-work reduction
+)
+with acceptable VRAM.
+```
+
+The `>=50%` path may be invoked **only if profiler/kernel evidence supplies an
+independent measured work proxy. Logical-position reduction alone does not
+qualify.**
+
+Compute the **geometric-mean candidates/s speedup across the final unique
+anchor set**, then interpret:
+
+```text
+>= 2.0x        strong
+1.5x..(<2.0x)  conditional, only if measured work reduction is clear
+< 1.5x         runtime bottleneck rather than architectural-speedup evidence
+```
+
+Fewer than four unique feasible anchors **disables both the strong and
+conditional A2 performance verdicts**, regardless of the geometric mean.
+
+## Status
 
 No GPU preflight has been run. P1 (harness implementation), the resource
 preflight, and any performance execution remain blocked pending final freeze
