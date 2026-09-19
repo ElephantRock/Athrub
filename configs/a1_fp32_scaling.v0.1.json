@@ -1,0 +1,49 @@
+{
+  "campaign": "A1 FP32 shared-context scaling (Issue #15)",
+  "protocol_version": "0.1",
+  "status": "frozen-before-gpu",
+  "precision": "fp32",
+  "bf16": "explicitly out of scope (Issue #11 disposition: plain shared BF16 UNSUPPORTED on this runtime)",
+  "binding": {
+    "reference_manifest_sha256": "fcd3cb6b3e56d747fa82b823353fa6eb893adface51ff2985190aa9f261834b5",
+    "frozen_at_commit": "b894981922e441b8e570f7be41d5ab79fec285d8",
+    "attention_policy": {
+      "backend": "efficient_sdpa",
+      "gqa_strategy": "expand_kv_heads",
+      "q_to_kv_ratio": 2,
+      "fallback_allowed": false
+    }
+  },
+  "grids": {
+    "candidate_counts": [2, 4, 8, 16, 32, 64, 128, 255],
+    "prefix_units": [128, 512, 1024, 2048, 4096, 8192],
+    "candidate_units": 16
+  },
+  "attribution": {
+    "prefix_units": [128, 512, 1024],
+    "candidate_counts": [2, 8, 32]
+  },
+  "cadence": {
+    "primary": { "warmups": 3, "repeats": 10 },
+    "anchor": { "warmups": 10, "repeats": 50 }
+  },
+  "correctness_gate": {
+    "comparison": "candidate_path_vs_reference_flat",
+    "max_abs_probability_delta_lt": 1e-05,
+    "argmax_exact": true,
+    "scope": "attribution cells and anchor suite, fp32"
+  },
+  "primary_comparison": "optimized/chunked flat vs chunked shared",
+  "metrics": [
+    "latency_ms per invocation",
+    "peak allocated/reserved CUDA bytes per invocation",
+    "logical token positions (flat and shared accounting)",
+    "prefix/continuation stage latencies for shared paths"
+  ],
+  "review_required_before_p1": [
+    "anchor suite cell list (Issue #15 protocol text)",
+    "chunking specification for optimized/chunked flat and chunked shared",
+    "attribution matrix execution-path set (per Phase 1 four-path definition)",
+    "infeasible-cell rule for the 8192-prefix FP32 regime (WDDM spill boundary)"
+  ]
+}
