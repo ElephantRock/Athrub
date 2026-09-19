@@ -95,15 +95,18 @@ failed and were not relaxed.
 ## Artifact integrity
 
 All artifacts live under `artifacts/a1-bf16-stability/` (gitignored; copy
-alongside the frozen A0 archive for durability). SHA-256 at record time:
+alongside the frozen A0 archive for durability). Exact SHA-256 digests at record
+time — the repository itself carries these so the evidence bundle remains
+identifiable without the gitignored files:
 
 | Artifact | sha256 |
 |---|---|
-| `layerwise_p128k2.json` | see `ARTIFACT_SHA256.txt` |
-| `first_block_trace_p128k2.json` | see `ARTIFACT_SHA256.txt` |
-| `shape_controls_p128k2.json` | see `ARTIFACT_SHA256.txt` |
-| `mixed_prefix_p128k2.json` | see `ARTIFACT_SHA256.txt` |
-| `mixed_prefix_suite.json` | see `ARTIFACT_SHA256.txt` |
-| `oracle_relative_dev_table.json` | see `ARTIFACT_SHA256.txt` |
+| `layerwise_p128k2.json` | `aa34e5bf496b4881d5dad3fa5452870b5ff3a4118d6d5311f63ac4296be0ef77` |
+| `first_block_trace_p128k2.json` | `4146be6df5fc2adf48346e0a96377e44c0891bef746e57fd60c28e0a4ca26c5d` |
+| `shape_controls_p128k2.json` | `7ffcad94e89c475736dc94c0c877ab690d82779dfc28acb5c2842657d6cee074` |
+| `mixed_prefix_p128k2.json` | `021c2d2366c13b8103e63e6d7027074ba90a716fb3a22339b6fe9455562399cc` |
+| `mixed_prefix_suite.json` | `7b1fd8818cbfee5d3a32bf7af773f9a60983b134054b1be36ff21448cd251756` |
+| `oracle_relative_dev_table.json` | `c8a967589c7470ba0b4cebf55d3bd55e278d3584b58bcc1026d0f5c615bbca9c` |
 
-`ARTIFACT_SHA256.txt` in the same directory records the exact digests.
+`ARTIFACT_SHA256.txt` in the same gitignored directory duplicates these digests
+for on-disk verification.
