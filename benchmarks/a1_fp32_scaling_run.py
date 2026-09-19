@@ -32,6 +32,7 @@ from athrub.contracts import DecisionRequest
 from athrub.provenance import sha256_path
 from athrub.reference import FlatReferenceBackend, ScalarDecisionHead
 from athrub.scaling import (
+    WddmSharedUsageMonitor,
     a2_performance_verdict,
     chunk_safety,
     clip_chunk_candidates,
@@ -145,33 +146,16 @@ def grid_request(prefix: int, k: int, candidate_units: int) -> DecisionRequest:
     )
 
 
-class WddmTelemetry:
-    """Samples the Windows GPU Process Memory 'Shared Usage' counter.
+class WddmTelemetry(WddmSharedUsageMonitor):
+    """Continuous per-PID shared-usage windows around each probe.
 
-    This is the external WDDM paging signal the v0.2 contract names: a probe
-    during which total shared usage rises above its pre-probe baseline is
-    observing shared-memory paging, independent of PyTorch's internal
-    allocated/reserved counters. Sampling is best-effort; a counter failure
-    yields None and the spill input degrades to the internal
-    reserved-beyond-physical signal only.
+    The base monitor streams the Windows GPU Process Memory Shared Usage
+    counter once per preflight and isolates this process's PID; probe_cell
+    opens a window before each probe and closes it after the post-forward
+    sync, capturing the in-window peak so transient spills are not missed and
+    unrelated desktop GPU activity is never attributed to the harness.
     """
 
-    def __init__(self) -> None:
-        self._script = (
-            "(Get-Counter '\\GPU Process Memory(*)\\Shared Usage' -SampleInterval 1 -MaxSamples 1 "
-            "-ErrorAction Stop).CounterSamples | Where-Object { $_.CookedValue -gt 0 } | "
-            "Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"
-        )
-
-    def sample(self) -> int | None:
-        try:
-            output = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", self._script],
-                capture_output=True, text=True, timeout=30, check=True,
-            )
-            return int(float(output.stdout.strip()))
-        except (OSError, subprocess.SubprocessError, ValueError):
-            return None
 
 
 def probe_cell(
@@ -213,7 +197,7 @@ def probe_cell(
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
-            shared_baseline = telemetry.sample() if telemetry is not None else None
+            window_token = telemetry.open_window() if telemetry is not None else None
             try:
                 if path_name == "flat":
                     flat_chunked_score(flat, request, chunk)
@@ -223,16 +207,18 @@ def probe_cell(
                 # region so asynchronous OOMs attribute to this probe.
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
-                shared_peak = telemetry.sample() if telemetry is not None else None
+                usage = telemetry.close_window(window_token) if telemetry is not None else None
                 decision = chunk_safety(
                     int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None,
                     int(torch.cuda.max_memory_reserved()) if torch.cuda.is_available() else None,
                     physical_bytes,
                     thresholds["peak_allocated_le_fraction_of_physical_vram"],
                     thresholds["peak_reserved_le_fraction_of_physical_vram"],
-                    external_shared_usage_bytes=shared_peak,
-                    external_shared_baseline_bytes=shared_baseline,
+                    external_shared_usage_bytes=usage["peak_bytes"] if usage else None,
+                    external_shared_baseline_bytes=usage["baseline_bytes"] if usage else None,
                 )
+                if usage is not None:
+                    decision["wddm_window_samples"] = usage["samples_in_window"]
                 decision["status"] = "safe" if decision["safe"] else "unsafe"
             except (torch.OutOfMemoryError, RuntimeError) as exception:
                 # torch.AcceleratorError subclasses RuntimeError on this build.
@@ -453,6 +439,9 @@ def main() -> None:
         expected_cell_keys = [f"p{cell[0]}-k{cell[1]}" for cell in ordered_cells]
         feasibility: dict[str, Any] = {"binding": binding, "cells": {}, "semantic": {}}
         telemetry = WddmTelemetry()
+        telemetry_available = telemetry.start()
+        if not telemetry_available:
+            print(json.dumps({"wddm_telemetry": "unavailable; spill detection degrades to internal reserved-beyond-physical only"}), flush=True)
         resumed_units = 0
         if PARTIAL_FEASIBILITY_PATH.is_file():
             # Resume an interrupted preflight: the checkpoint's binding must
@@ -501,6 +490,7 @@ def main() -> None:
         feasibility["complete"] = True
         _atomic_write_json(feasibility_path, feasibility)
         PARTIAL_FEASIBILITY_PATH.unlink(missing_ok=True)
+        telemetry.stop()
         provenance = {
             "action": "preflight",
             "binding": binding,
@@ -508,7 +498,11 @@ def main() -> None:
             "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
             "physical_vram_bytes": physical_bytes,
             "resumed_units": resumed_units,
-            "wddm_telemetry": "GPU Process Memory Shared Usage sampled per probe; spill = shared usage above pre-probe baseline",
+            "wddm_telemetry": (
+                "continuous per-PID GPU Process Memory Shared Usage via typeperf; spill = in-window peak above pre-window baseline for this process"
+                if telemetry_available
+                else "unavailable; internal reserved-beyond-physical only"
+            ),
         }
         # Phase-specific provenance files preserve both RuntimeSession records;
         # measure never overwrites the preflight evidence.

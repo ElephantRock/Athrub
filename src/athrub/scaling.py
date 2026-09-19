@@ -12,8 +12,12 @@ frozen contract; this module must not change any of them.
 from __future__ import annotations
 
 import math
+import os
 import random
 import re
+import subprocess
+import threading
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -511,12 +515,16 @@ def is_memory_stop_decision(decision: dict[str, Any]) -> bool:
 
 
 def stop_reason(decision: dict[str, Any]) -> str:
-    """Concrete ladder-stop cause: OOM kind or the threshold decision's stop_cause."""
+    """Concrete ladder-stop cause: OOM kind or the threshold decision's stop_cause.
+
+    ``no_memory_statistics`` is a concrete diagnosable cause and is reported
+    as-is; only the absent/none sentinel falls back to the raw status.
+    """
 
     if decision.get("status") == "oom":
         return "oom"
     cause = decision.get("stop_cause")
-    if isinstance(cause, str) and cause not in {"", "none", "no_memory_statistics"}:
+    if isinstance(cause, str) and cause not in {"", "none"}:
         return cause
     return str(decision.get("status", "unknown"))
 
@@ -558,6 +566,33 @@ def resume_partial_feasibility(
     for request_id in semantic:
         if request_id not in expected_semantic_ids:
             raise ValueError(f"checkpoint carries unknown semantic request: {request_id}")
+
+    # Order-structure validation: completed cells must form an exact prefix of
+    # the frozen deterministic cell order (a gap means the checkpoint was not
+    # produced by this runner), and semantic rows may only exist once every
+    # grid cell is complete, themselves as a prefix of the semantic order.
+    completed = set(cells)
+    cell_prefix = 0
+    for key in expected_cell_keys:
+        if key in completed:
+            cell_prefix += 1
+        else:
+            break
+    if completed and cell_prefix != len(completed):
+        raise ValueError(
+            "checkpoint cells are not a prefix of the frozen deterministic order; refusing resume"
+        )
+    if semantic and cell_prefix != len(expected_cell_keys):
+        raise ValueError("checkpoint carries semantic rows before all grid cells completed; refusing resume")
+    completed_semantic = set(semantic)
+    semantic_prefix = 0
+    for request_id in expected_semantic_ids:
+        if request_id in completed_semantic:
+            semantic_prefix += 1
+        else:
+            break
+    if completed_semantic and semantic_prefix != len(completed_semantic):
+        raise ValueError("checkpoint semantic rows are not a prefix of the frozen order; refusing resume")
     return {"cells": cells, "semantic": semantic, "resumed_units": len(cells) + len(semantic)}
 
 
@@ -567,3 +602,136 @@ def resolve_complete_feasibility_state(record: dict[str, Any]) -> str:
     if record.get("complete") is True:
         return "complete"
     return f"partial ({len(record.get('cells', {}))} cells, {len(record.get('semantic', {}))} semantic)"
+
+
+class WddmSharedUsageMonitor:
+    r"""Continuous per-process WDDM shared-usage telemetry.
+
+    Streams the Windows ``GPU Process Memory(*)\Shared Usage`` counter once
+    per preflight via ``typeperf`` and maintains a timestamped series of the
+    total shared bytes attributed to *this process's PID only*, so transient
+    spills during a probe are captured and unrelated desktop/browser GPU
+    activity is never attributed to the harness. Degrades to unavailable when
+    typeperf or the counter is missing; callers then fall back to the internal
+    reserved-beyond-physical spill signal alone.
+    """
+
+    def __init__(self, pid: int | None = None) -> None:
+        self._pid_tag = f"pid_{pid if pid is not None else os.getpid()}_"
+        self._process: subprocess.Popen[str] | None = None
+        self._reader: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._series: list[tuple[float, int]] = []
+        self.available = False
+
+    @staticmethod
+    def parse_typeperf_header(line: str) -> list[str]:
+        """Split a typeperf header line into counter instance names."""
+
+        return [column.strip('"').strip() for column in line.rstrip("\r\n").split('","')]
+
+    @staticmethod
+    def parse_typeperf_row(line: str) -> tuple[str, list[str]]:
+        """Split a typeperf data row into its timestamp and raw value columns."""
+
+        columns = line.rstrip("\r\n").split('","')
+        if not columns:
+            return "", []
+        return columns[0].strip('"'), [column.strip('"') for column in columns[1:]]
+
+    def _pid_shared_bytes(self, instances: Sequence[str], values: Sequence[str]) -> int | None:
+        total = 0
+        matched = False
+        for instance, value in zip(instances, values, strict=False):
+            if self._pid_tag not in instance:
+                continue
+            matched = True
+            if value.strip():
+                try:
+                    total += int(float(value))
+                except ValueError:
+                    continue
+        return total if matched else None
+
+    def _read_stream(self) -> None:
+        assert self._process is not None and self._process.stdout is not None
+        instances: list[str] = []
+        for line in self._process.stdout:
+            line = line.strip()
+            if not line or line.startswith(("(Exit Code", "The command completed")):
+                continue
+            if "Error:" in line:
+                return
+            if not instances:
+                header = self.parse_typeperf_header(line)
+                if header and header[0] in {"Timestamp", "timestamp"} or "GPU Process Memory" in line:
+                    instances = [column for column in header[1:]] if len(header) > 1 else []
+                    if not any(self._pid_tag in column for column in instances):
+                        instances = []
+                continue
+            _, values = self.parse_typeperf_row(line)
+            shared = self._pid_shared_bytes(instances, values)
+            if shared is not None:
+                with self._lock:
+                    self._series.append((time.monotonic(), shared))
+        return
+
+    def start(self) -> bool:
+        """Launch the streaming sampler; returns whether telemetry is available."""
+
+        try:
+            self._process = subprocess.Popen(
+                ["typeperf", r"\GPU Process Memory(*)\Shared Usage", "-si", "1"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            self.available = False
+            return False
+        self._reader = threading.Thread(target=self._read_stream, daemon=True)
+        self._reader.start()
+        self.available = True
+        return True
+
+    def stop(self) -> None:
+        if self._process is not None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+            self._process = None
+
+    def open_window(self) -> float | None:
+        """Mark a probe window start; returns the monotonic timestamp token."""
+
+        if not self.available:
+            return None
+        return time.monotonic()
+
+    def close_window(self, start_token: float | None) -> dict[str, Any] | None:
+        """Summarize the window: baseline (pre-window) and in-window peak."""
+
+        if not self.available or start_token is None:
+            return None
+        with self._lock:
+            series = list(self._series)
+        baseline: int | None = None
+        peak: int | None = None
+        samples_in_window = 0
+        for timestamp, shared in series:
+            if timestamp < start_token:
+                baseline = shared
+            else:
+                samples_in_window += 1
+                peak = shared if peak is None else max(peak, shared)
+        if peak is None:
+            return None
+        return {
+            "peak_bytes": peak,
+            "baseline_bytes": baseline if baseline is not None else 0,
+            "samples_in_window": samples_in_window,
+        }
