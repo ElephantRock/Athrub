@@ -46,6 +46,8 @@ class CacheAwareAccumulatingModel(nn.Module):
     ) -> SimpleNamespace:
         assert return_dict is True
         self.calls += 1
+        if past_key_values is not None and not isinstance(past_key_values, tuple):
+            past_key_values = past_key_values.to_legacy_cache()
         current_mask = attention_mask[:, -input_ids.shape[1] :].float()
         current_values = input_ids.float() * current_mask
 

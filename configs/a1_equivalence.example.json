@@ -1,0 +1,38 @@
+{
+  "reference_name": "Athrub A0 Reference v0.1",
+  "substrate_path": "artifacts/a0-reference-v0.1-run1/substrate",
+  "tokenizer_path": "artifacts/a0-reference-v0.1-run1/tokenizer",
+  "decision_head_path": "artifacts/a0-reference-v0.1-run1/decision_head.pt",
+  "reference_manifest_path": "artifacts/a0-reference-v0.1-run1/reference_manifest.json",
+  "frozen_canonical_root": "artifacts/a0-reference-v0.1-run1/canonical-benchmark",
+  "device": "cuda",
+  "head_bias": true,
+  "add_bos": true,
+  "attention_policy": {
+    "backend": "efficient_sdpa",
+    "gqa_strategy": "expand_kv_heads",
+    "q_to_kv_ratio": 2,
+    "fallback_allowed": false
+  },
+  "precisions": ["fp32", "bf16"],
+  "candidate_units": 16,
+  "shape_cells": [
+    [128, 2],
+    [128, 8],
+    [512, 4],
+    [512, 16],
+    [1024, 2],
+    [1024, 8]
+  ],
+  "near_tie_epsilon": {
+    "fp32": 1e-5,
+    "bf16": 1e-3
+  },
+  "gates": {
+    "fp32_max_abs_probability_delta": 1e-5,
+    "bf16_max_abs_probability_delta": 1e-3,
+    "argmax_agreement": 1.0
+  },
+  "profile_stages": true,
+  "output_dir": "artifacts/a1-equivalence-v0.2"
+}

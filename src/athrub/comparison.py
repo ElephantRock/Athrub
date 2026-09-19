@@ -21,6 +21,13 @@ class ComparisonMetrics:
     mean_abs_probability_delta: float
     total_variation: float
     kl_reference_to_candidate: float
+    reference_top1_index: int = -1
+    reference_top2_index: int = -1
+    reference_top1_probability: float = 0.0
+    reference_top2_probability: float = 0.0
+    reference_probability_margin: float = 0.0
+    near_tie: bool = False
+    near_tie_threshold: float | None = None
 
 
 def _kl_divergence(reference: np.ndarray, candidate: np.ndarray, eps: float = 1e-12) -> float:
@@ -29,7 +36,22 @@ def _kl_divergence(reference: np.ndarray, candidate: np.ndarray, eps: float = 1e
     return float(np.sum(p * np.log(p / q)))
 
 
-def compare_result(reference: DecisionResult, candidate: DecisionResult) -> ComparisonMetrics:
+def compare_result(
+    reference: DecisionResult,
+    candidate: DecisionResult,
+    *,
+    near_tie_threshold: float | None = None,
+) -> ComparisonMetrics:
+    """Compare a candidate execution against the reference execution.
+
+    ``near_tie_threshold`` is the top-two probability margin at or below which a
+    reference decision is flagged as numerically near-tied: if both top
+    probabilities can each move by at most half the threshold, the top-two
+    ordering cannot be guaranteed, so an argmax flip inside that zone is
+    explainable as finite precision. Near-tie status is diagnostic only; it never
+    waives ``argmax_equal``.
+    """
+
     if reference.request_id != candidate.request_id:
         raise ValueError("cannot compare results with different request ids")
 
@@ -47,6 +69,11 @@ def compare_result(reference: DecisionResult, candidate: DecisionResult) -> Comp
 
     logit_delta = np.abs(ref_logits - cand_logits)
     prob_delta = np.abs(ref_prob - cand_prob)
+    ordering = np.argsort(-ref_prob, kind="stable")
+    top1_index, top2_index = (int(ordering[0]), int(ordering[1]))
+    top1_probability = float(ref_prob[top1_index])
+    top2_probability = float(ref_prob[top2_index])
+    margin = top1_probability - top2_probability
 
     return ComparisonMetrics(
         request_id=reference.request_id,
@@ -57,6 +84,13 @@ def compare_result(reference: DecisionResult, candidate: DecisionResult) -> Comp
         mean_abs_probability_delta=float(prob_delta.mean()),
         total_variation=float(0.5 * prob_delta.sum()),
         kl_reference_to_candidate=_kl_divergence(ref_prob, cand_prob),
+        reference_top1_index=top1_index,
+        reference_top2_index=top2_index,
+        reference_top1_probability=top1_probability,
+        reference_top2_probability=top2_probability,
+        reference_probability_margin=margin,
+        near_tie=near_tie_threshold is not None and margin <= near_tie_threshold,
+        near_tie_threshold=near_tie_threshold,
     )
 
 

@@ -133,8 +133,15 @@ def test_candidate_reordering_only_reorders_corresponding_scores() -> None:
 
     forward_result, reverse_result = backend.score((forward, reverse))
 
-    assert reverse_result.logits == pytest.approx(tuple(reversed(forward_result.logits)))
-    assert reverse_result.probabilities == pytest.approx(tuple(reversed(forward_result.probabilities)))
+    # Candidate row order changes CPU matmul tiling, so reversed scores can differ
+    # by a few ulps across torch runtimes; the invariant under test is the ordering
+    # correspondence, not bit equality.
+    assert reverse_result.logits == pytest.approx(
+        tuple(reversed(forward_result.logits)), abs=1e-6
+    )
+    assert reverse_result.probabilities == pytest.approx(
+        tuple(reversed(forward_result.probabilities)), abs=1e-6
+    )
 
 
 def test_reference_backend_emits_exact_token_accounting() -> None:

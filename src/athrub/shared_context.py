@@ -44,6 +44,29 @@ def _to_legacy_cache(cache: Any) -> tuple[Any, ...]:
     )
 
 
+def _from_legacy_cache(cache: tuple[Any, ...], reference: Any) -> Any:
+    """Rebuild a branched cache in the family the model originally returned.
+
+    Complements ``_to_legacy_cache``: branching happens on the immutable tuple
+    representation, while the continuation boundary must receive the cache family
+    the model natively produces. ``reference`` is the raw cache object obtained
+    from the prefix call (a legacy tuple, or ``None`` when no cache library is
+    involved). Tuple-family models keep tuple caches; object-family caches are
+    reconstructed through their own ``from_legacy_cache`` constructor so the
+    adapter never silently switches cache representation.
+    """
+
+    if reference is None or isinstance(reference, tuple):
+        return cache
+    constructor = getattr(type(reference), "from_legacy_cache", None)
+    if not callable(constructor):
+        raise TypeError(
+            "cannot rebuild branched cache: model returned cache of type "
+            f"{type(reference).__name__!r} without a from_legacy_cache() constructor"
+        )
+    return constructor(cache)
+
+
 def _expand_cache_value(value: Any, batch_size: int) -> Any:
     if isinstance(value, torch.Tensor):
         if value.ndim == 0:
@@ -153,7 +176,7 @@ class SharedContextBackend(FlatReferenceBackend):
                 input_ids=suffix_tensor,
                 attention_mask=full_attention_mask,
                 position_ids=position_ids,
-                past_key_values=branched_cache,
+                past_key_values=_from_legacy_cache(branched_cache, raw_cache),
                 use_cache=False,
                 return_dict=True,
             )
