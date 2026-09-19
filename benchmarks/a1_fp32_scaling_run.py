@@ -196,21 +196,36 @@ def _verdict_thresholds(contract: dict[str, Any]) -> dict[str, int]:
     """Derive the A2 band thresholds and anchor minimum from the frozen contract.
 
     The contract stores the interpretation as text (">= 2.0x", "1.5x <= speedup
-    < 2.0x", "fewer than four unique feasible anchors"); this parser validates
-    those strings rather than letting numeric constants drift in code.
+    < 2.0x", "fewer than four unique feasible anchors"). The numbers are parsed
+    out of those strings so the code carries no independent constants; any
+    contract drift surfaces as a parse failure rather than a silent mismatch.
     """
 
+    import re
+
     bands = contract["a2_interpretation"]["verdict_bands"]
-    strong_text = bands["strong"]
-    conditional_text = bands["conditional"]
-    minimum_text = contract["a2_interpretation"]["anchor_minimum"]
-    if not strong_text.startswith(">= "):
-        raise SystemExit(f"unparseable strong band: {strong_text!r}")
-    if "1.5x <= speedup < 2.0x" not in conditional_text:
-        raise SystemExit(f"unparseable conditional band: {conditional_text!r}")
-    if "fewer than four unique feasible anchors" not in minimum_text:
-        raise SystemExit(f"unparseable anchor minimum: {minimum_text!r}")
-    return {"strong": 2, "conditional": 1.5, "minimum_anchors": 4}
+    strong_match = re.fullmatch(r">= ([0-9.]+)x", bands["strong"])
+    # The conditional band text carries a trailing qualification clause; match
+    # the numeric range at the start of the string.
+    conditional_match = re.match(r"([0-9.]+)x <= speedup < ([0-9.]+)x", bands["conditional"])
+    minimum_match = re.search(r"fewer than ([a-z]+) unique feasible anchors", contract["a2_interpretation"]["anchor_minimum"])
+    if strong_match is None or conditional_match is None or minimum_match is None:
+        raise SystemExit(
+            "cannot derive A2 thresholds from the frozen interpretation text: "
+            f"{bands['strong']!r} / {bands['conditional']!r} / {contract['a2_interpretation']['anchor_minimum']!r}"
+        )
+    number_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+    minimum_anchors = number_words.get(minimum_match.group(1))
+    if minimum_anchors is None:
+        raise SystemExit(f"unparseable anchor minimum word: {minimum_match.group(1)!r}")
+    derived = {
+        "strong": float(strong_match.group(1)),
+        "conditional": float(conditional_match.group(1)),
+        "minimum_anchors": minimum_anchors,
+    }
+    if derived["conditional"] >= derived["strong"]:
+        raise SystemExit(f"conditional band must sit below the strong band: {derived}")
+    return derived
 
 
 def _binding_block(policy: AttentionPolicy, physical_bytes: int) -> dict[str, Any]:
@@ -283,11 +298,15 @@ def measure_cell(
 
     flat_names = sorted(name for name in paths if name.startswith("flat"))
     shared_names = sorted(name for name in paths if name.startswith("shared"))
-    results = {}
+    # Warmup cadence is exactly the frozen count. The correctness snapshot
+    # reuses the final warmup invocation's outputs rather than adding an extra
+    # untimed execution after warmup.
+    results: dict[str, Any] = {}
     for name, (score, backend, chunk) in paths.items():
+        result = None
         for _ in range(warmups):
-            score(backend, request, chunk)
-        results[name] = score(backend, request, chunk)
+            result = score(backend, request, chunk)
+        results[name] = result
 
     latencies: dict[str, list[float]] = {name: [] for name in paths}
     peaks: dict[str, dict[str, int]] = {
@@ -407,7 +426,9 @@ def main() -> None:
             "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
             "physical_vram_bytes": physical_bytes,
         }
-        (OUTPUT_DIR / "provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # Phase-specific provenance files preserve both RuntimeSession records;
+        # measure never overwrites the preflight evidence.
+        (OUTPUT_DIR / "provenance_preflight.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"])}, indent=2))
         return
 
@@ -459,6 +480,10 @@ def main() -> None:
                 },
                 cadence["primary"]["warmups"], cadence["primary"]["repeats"], tolerance,
             )
+            # Suites metadata reflects the resolved final anchor set, not the
+            # original list, so a substituted anchor cell reports "anchor".
+            if is_anchor and "anchor" not in membership:
+                membership = [*membership, "anchor"]
             pair_row["suites"] = membership
             suites["primary"].append(pair_row)
             if is_anchor:
@@ -552,7 +577,7 @@ def main() -> None:
             "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
             "physical_vram_bytes": physical_bytes,
         }
-        (OUTPUT_DIR / "provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (OUTPUT_DIR / "provenance_measure.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(summary, indent=2, sort_keys=True))
 
 

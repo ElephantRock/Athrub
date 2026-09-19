@@ -281,13 +281,29 @@ def test_verdict_thresholds_derived_from_contract() -> None:
     import json as _json
     from pathlib import Path
 
+    from benchmarks.a1_fp32_scaling_run import _verdict_thresholds
+
     contract = _json.loads(Path("configs/a1_fp32_scaling.v0.1.json").read_text(encoding="utf-8"))
-    bands = contract["a2_interpretation"]["verdict_bands"]
-    strong = float(bands["strong"].replace(">= ", "").rstrip("x"))
-    conditional = 1.5
-    assert "1.5x <= speedup < 2.0x" in bands["conditional"]
-    assert strong == 2.0 and conditional == 1.5
-    assert "fewer than four unique feasible anchors" in contract["a2_interpretation"]["anchor_minimum"]
+    derived = _verdict_thresholds(contract)
+    # Values parsed from the frozen interpretation text, not hard-coded.
+    assert derived == {"strong": 2.0, "conditional": 1.5, "minimum_anchors": 4}
+    # A drifted contract must fail derivation rather than silently pass.
+    drifted = _json.loads(_json.dumps(contract))
+    drifted["a2_interpretation"]["verdict_bands"]["strong"] = "at least twice as fast"
+    try:
+        _verdict_thresholds(drifted)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("drifted strong band must fail derivation")
+    inverted = _json.loads(_json.dumps(contract))
+    inverted["a2_interpretation"]["verdict_bands"]["conditional"] = "3.0x <= speedup < 4.0x"
+    try:
+        _verdict_thresholds(inverted)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("conditional above strong must fail derivation")
 
 
 def test_substituted_anchor_treated_as_final() -> None:
