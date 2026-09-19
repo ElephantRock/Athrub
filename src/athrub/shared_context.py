@@ -44,6 +44,22 @@ def _to_legacy_cache(cache: Any) -> tuple[Any, ...]:
     )
 
 
+def _from_legacy_cache(cache: tuple[Any, ...]) -> Any:
+    """Convert a branched legacy tuple cache back into the model's expected cache object.
+
+    Complements ``_to_legacy_cache``: branching happens on the immutable tuple
+    representation, while current model libraries require a cache object exposing
+    ``get_seq_length`` at the continuation boundary. When the cache library is not
+    installed (dependency-free tests), the tuple is passed through unchanged.
+    """
+
+    try:
+        from transformers import DynamicCache
+    except ImportError:
+        return cache
+    return DynamicCache.from_legacy_cache(cache)
+
+
 def _expand_cache_value(value: Any, batch_size: int) -> Any:
     if isinstance(value, torch.Tensor):
         if value.ndim == 0:
@@ -153,7 +169,7 @@ class SharedContextBackend(FlatReferenceBackend):
                 input_ids=suffix_tensor,
                 attention_mask=full_attention_mask,
                 position_ids=position_ids,
-                past_key_values=branched_cache,
+                past_key_values=_from_legacy_cache(branched_cache),
                 use_cache=False,
                 return_dict=True,
             )
