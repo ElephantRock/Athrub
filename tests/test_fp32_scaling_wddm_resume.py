@@ -38,16 +38,25 @@ def test_wddm_monitor_pid_isolated_parsing() -> None:
 
 
 def test_wddm_monitor_window_peak_and_baseline() -> None:
+    import time as _time
+
     monitor = WddmSharedUsageMonitor(pid=4242)
+    start = _time.monotonic()
     with monitor._lock:
-        monitor._series = [(1.0, 100), (2.0, 500), (3.0, 200), (4.0, 50)]
+        # Timestamps on the real monotonic clock. The end boundary is computed
+        # inside close_window (a few microseconds after start), so in-window
+        # samples sit exactly at the window start to order deterministically.
+        monitor._series = [(start - 2.0, 100), (start - 1.0, 500), (start, 200), (start, 50)]
     monitor.available = True
-    token = monitor.open_window()
-    assert token is not None
-    window = monitor.close_window(2.5)
-    assert window == {"peak_bytes": 200, "baseline_bytes": 500, "samples_in_window": 2}
-    # A window with no in-window samples yields None, not a fabricated peak.
-    assert monitor.close_window(99.0) is None
+    monitor.open_window()
+    window = monitor.close_window(start)
+    assert window == {
+        "status": "covered",
+        "peak_bytes": 200,
+        "baseline_bytes": 500,
+        "samples_in_window": 2,  # start+0.2 and start+0.4; both arrive before the end
+        "post_window_sample_used": False,
+    }
     coverage = monitor.coverage()
     assert coverage["windows_opened"] == 1 and coverage["windows_with_telemetry"] == 1
 
@@ -132,3 +141,65 @@ def test_normal_stop_is_clean_unexpected_death_is_degraded() -> None:
     if not unexpected._stopping:
         unexpected.degraded_reason = unexpected.degraded_reason or "typeperf stream ended"
     assert unexpected.degraded_reason == "typeperf stream ended"
+
+
+def test_window_summarization_clips_at_end_boundary() -> None:
+    series = [(1.0, 100), (2.0, 500), (3.0, 200), (4.0, 50)]
+    summary = WddmSharedUsageMonitor.summarize_window(series, start_token=1.5, end_token=3.0)
+    assert summary == {
+        "baseline_bytes": 100,
+        "peak_bytes": 500,  # samples at 2.0 and 3.0; the 4.0 sample is past the end
+        "samples_in_window": 2,
+        "post_window_sample_bytes": 50,
+    }
+
+
+def test_close_window_explicit_no_sample_status() -> None:
+    monitor = WddmSharedUsageMonitor(pid=4242)
+    monitor.available = True
+    with monitor._lock:
+        monitor._series = [(1.0, 100)]  # only a pre-window sample exists
+    monitor.open_window()
+    result = monitor.close_window(2.0, wait_for_sample_seconds=0.05)
+    # Short window with no arriving sample: explicit lack of coverage, never
+    # a silent no-spill fallback.
+    assert result is not None
+    assert result["status"] == "no_sample_in_window"
+    assert result["baseline_bytes"] == 100
+    coverage = monitor.coverage()
+    assert coverage["windows_without_telemetry"] == 1
+
+
+def test_close_window_uses_post_window_sample_explicitly() -> None:
+    import time as _time
+
+    monitor = WddmSharedUsageMonitor(pid=4242)
+    monitor.available = True
+    start = _time.monotonic()
+    with monitor._lock:
+        # Pre-window baseline plus a sample timestamped far after the window
+        # will have closed: the bounded wait finds no in-window sample, then
+        # uses the post-window observation explicitly and flags it.
+        monitor._series = [(start - 1.0, 100), (start + 10.0, 700)]
+    monitor.open_window()
+    result = monitor.close_window(start, wait_for_sample_seconds=0.05)
+    assert result["status"] == "covered"
+    assert result["peak_bytes"] == 700
+    assert result["post_window_sample_used"] is True
+    assert result["samples_in_window"] == 0
+
+
+def test_aggregate_segment_coverage_sums_all_segments() -> None:
+    from athrub.scaling import aggregate_segment_coverage
+
+    segments = [
+        {"segment_id": "a", "wddm_telemetry_coverage": {"windows_opened": 10, "windows_with_telemetry": 9, "windows_without_telemetry": 1, "samples": 90}},
+        {"segment_id": "b", "wddm_telemetry_coverage": {"windows_opened": 5, "windows_with_telemetry": 4, "windows_without_telemetry": 1, "samples": 40}},
+        {"segment_id": "legacy", "note": "no coverage recorded"},
+    ]
+    aggregate = aggregate_segment_coverage(segments)
+    assert aggregate["segment_count"] == 3
+    assert aggregate["windows_opened"] == 15
+    assert aggregate["windows_with_telemetry"] == 13
+    assert aggregate["windows_without_telemetry"] == 2
+    assert aggregate["samples"] == 130

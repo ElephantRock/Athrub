@@ -630,6 +630,7 @@ class WddmSharedUsageMonitor:
         self.degraded_reason: str | None = None
         self._windows_opened = 0
         self._windows_with_telemetry = 0
+        self._windows_without_telemetry = 0
         self._stopping = False
 
     @staticmethod
@@ -760,31 +761,90 @@ class WddmSharedUsageMonitor:
         self._windows_opened += 1
         return time.monotonic()
 
-    def close_window(self, start_token: float | None) -> dict[str, Any] | None:
-        """Summarize the window: baseline (pre-window) and in-window peak."""
+    @staticmethod
+    def summarize_window(
+        series: Sequence[tuple[float, int]], start_token: float, end_token: float
+    ) -> dict[str, Any]:
+        """Pure window summarization with end-boundary clipping.
 
-        if not self.available or start_token is None:
-            return None
-        with self._lock:
-            series = list(self._series)
-        if self._reader is not None and not self._reader.is_alive() and self.degraded_reason is None:
-            self.degraded_reason = "reader thread exited"
+        Only samples with timestamps inside [start_token, end_token] count
+        toward the window; anything arriving after the window closed belongs
+        to no window and must not be attributed to the following probe. When
+        the window itself contains no sample, the first sample at or after the
+        window start is reported separately as a post-window observation so
+        the caller can use it explicitly rather than silently.
+        """
+
         baseline: int | None = None
         peak: int | None = None
         samples_in_window = 0
+        post_window: int | None = None
         for timestamp, shared in series:
             if timestamp < start_token:
                 baseline = shared
-            else:
+            elif timestamp <= end_token:
                 samples_in_window += 1
                 peak = shared if peak is None else max(peak, shared)
-        if peak is None:
-            return None
-        self._windows_with_telemetry += 1
+            elif post_window is None:
+                post_window = shared
         return {
+            "baseline_bytes": baseline,
             "peak_bytes": peak,
-            "baseline_bytes": baseline if baseline is not None else 0,
             "samples_in_window": samples_in_window,
+            "post_window_sample_bytes": post_window,
+        }
+
+    def close_window(
+        self, start_token: float | None, wait_for_sample_seconds: float = 2.0
+    ) -> dict[str, Any] | None:
+        """Close a probe window with bounded, explicit coverage.
+
+        The window ends now. Because typeperf samples at one-second intervals,
+        a short probe may legitimately close before its first in-window
+        sample arrives: we wait a bounded time for either an in-window sample
+        or the first post-window sample (explicitly flagged as such, never
+        silently attributed). If nothing arrives, the window is reported as
+        lacking WDDM coverage — never as a silent no-spill fallback.
+        """
+
+        if not self.available or start_token is None:
+            return None
+        if self._reader is not None and not self._reader.is_alive() and self.degraded_reason is None:
+            self.degraded_reason = "reader thread exited"
+        end_token = time.monotonic()
+        deadline = end_token + max(0.0, wait_for_sample_seconds)
+        while True:
+            with self._lock:
+                series = list(self._series)
+            summary = self.summarize_window(series, start_token, end_token)
+            if summary["peak_bytes"] is not None or summary["post_window_sample_bytes"] is not None:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        if summary["peak_bytes"] is not None:
+            self._windows_with_telemetry += 1
+            return {
+                "status": "covered",
+                "peak_bytes": summary["peak_bytes"],
+                "baseline_bytes": summary["baseline_bytes"] or 0,
+                "samples_in_window": summary["samples_in_window"],
+                "post_window_sample_used": False,
+            }
+        if summary["post_window_sample_bytes"] is not None:
+            self._windows_with_telemetry += 1
+            return {
+                "status": "covered",
+                "peak_bytes": summary["post_window_sample_bytes"],
+                "baseline_bytes": summary["baseline_bytes"] or 0,
+                "samples_in_window": 0,
+                "post_window_sample_used": True,
+            }
+        self._windows_without_telemetry += 1
+        return {
+            "status": "no_sample_in_window",
+            "baseline_bytes": summary["baseline_bytes"],
+            "waited_seconds": max(0.0, wait_for_sample_seconds),
         }
 
     def coverage(self) -> dict[str, Any]:
@@ -799,4 +859,26 @@ class WddmSharedUsageMonitor:
             "samples": samples,
             "windows_opened": self._windows_opened,
             "windows_with_telemetry": self._windows_with_telemetry,
+            "windows_without_telemetry": self._windows_without_telemetry,
         }
+
+
+def aggregate_segment_coverage(segments: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate WDDM coverage across all preflight process segments.
+
+    A resumed preflight runs in multiple process segments; each segment
+    records its own telemetry coverage and session evidence. The aggregate
+    sums window accounting so final provenance describes the entire run
+    rather than only the continuation segment.
+    """
+
+    totals = {"windows_opened": 0, "windows_with_telemetry": 0, "windows_without_telemetry": 0, "samples": 0}
+    for segment in segments:
+        coverage = segment.get("wddm_telemetry_coverage", {}) or {}
+        for key in totals:
+            totals[key] += int(coverage.get(key, 0) or 0)
+    return {
+        "segment_count": len(segments),
+        **totals,
+        "segments_note": "each entry in provenance.segments is one preflight process segment; resume appends segments",
+    }

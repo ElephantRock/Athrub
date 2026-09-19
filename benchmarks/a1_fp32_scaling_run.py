@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import time
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from athrub.reference import FlatReferenceBackend, ScalarDecisionHead
 from athrub.scaling import (
     WddmSharedUsageMonitor,
     a2_performance_verdict,
+    aggregate_segment_coverage,
     chunk_safety,
     clip_chunk_candidates,
     deterministic_cell_order,
@@ -208,17 +210,26 @@ def probe_cell(
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 usage = telemetry.close_window(window_token) if telemetry is not None else None
+                covered = usage is not None and usage.get("status") == "covered"
                 decision = chunk_safety(
                     int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None,
                     int(torch.cuda.max_memory_reserved()) if torch.cuda.is_available() else None,
                     physical_bytes,
                     thresholds["peak_allocated_le_fraction_of_physical_vram"],
                     thresholds["peak_reserved_le_fraction_of_physical_vram"],
-                    external_shared_usage_bytes=usage["peak_bytes"] if usage else None,
-                    external_shared_baseline_bytes=usage["baseline_bytes"] if usage else None,
+                    external_shared_usage_bytes=usage["peak_bytes"] if covered else None,
+                    external_shared_baseline_bytes=usage["baseline_bytes"] if covered else None,
                 )
                 if usage is not None:
-                    decision["wddm_window_samples"] = usage["samples_in_window"]
+                    decision["wddm_window_coverage"] = usage["status"]
+                    if covered:
+                        decision["wddm_window_samples"] = usage["samples_in_window"]
+                        decision["wddm_post_window_sample_used"] = usage["post_window_sample_used"]
+                    else:
+                        # Explicit lack of WDDM observation for this probe: the
+                        # safety decision used internal signals only, and the
+                        # artifact says so rather than implying observed no-spill.
+                        decision["wddm_no_sample_waited_seconds"] = usage.get("waited_seconds")
                 decision["status"] = "safe" if decision["safe"] else "unsafe"
             except (torch.OutOfMemoryError, RuntimeError) as exception:
                 # torch.AcceleratorError subclasses RuntimeError on this build.
@@ -443,12 +454,14 @@ def main() -> None:
         if not telemetry_available:
             print(json.dumps({"wddm_telemetry": "unavailable; spill detection degrades to internal reserved-beyond-physical only"}), flush=True)
         resumed_units = 0
+        prior_segments: list[dict[str, Any]] = []
         if PARTIAL_FEASIBILITY_PATH.is_file():
             # Resume an interrupted preflight: the checkpoint's binding must
             # match this execution exactly, otherwise it is stale and discarded.
             try:
+                partial_state = json.loads(PARTIAL_FEASIBILITY_PATH.read_text(encoding="utf-8"))
                 state = resume_partial_feasibility(
-                    json.loads(PARTIAL_FEASIBILITY_PATH.read_text(encoding="utf-8")),
+                    partial_state,
                     binding,
                     expected_cell_keys,
                     semantic_ids,
@@ -459,12 +472,35 @@ def main() -> None:
                 feasibility["cells"] = state["cells"]
                 feasibility["semantic"] = state["semantic"]
                 resumed_units = state["resumed_units"]
-                print(json.dumps({"checkpoint_resumed_units": resumed_units}), flush=True)
+                loaded_segments = partial_state.get("segments")
+                if isinstance(loaded_segments, list):
+                    prior_segments = loaded_segments
+                else:
+                    prior_segments = [{
+                        "segment_id": "unknown-prior-segment",
+                        "note": "checkpoint predates segment provenance; its telemetry/session evidence is not recoverable",
+                    }]
+                print(json.dumps({"checkpoint_resumed_units": resumed_units, "prior_segments": len(prior_segments)}), flush=True)
+
+        # Segment provenance: each preflight process (fresh or resumed) records
+        # its own telemetry coverage and session evidence into the checkpoint,
+        # so final provenance describes every segment of the run, never only
+        # the continuation.
+        current_segment: dict[str, Any] = {
+            "segment_id": f"segment-{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}",
+            "execution_git_sha": binding["execution_git_sha"],
+            "resumed_units_carried_forward": resumed_units,
+            "cells_completed_this_segment": 0,
+            "semantic_completed_this_segment": 0,
+        }
+        feasibility["segments"] = [*prior_segments, current_segment]
 
         def checkpoint_partial() -> None:
             # Durable checkpoint after every completed unit: atomic replace,
             # explicitly incomplete, so a crash costs at most the current cell
-            # while partial evidence can never enter measurement.
+            # while partial evidence can never enter measurement. The current
+            # segment's telemetry coverage snapshot rides along.
+            current_segment["wddm_telemetry_coverage"] = telemetry.coverage()
             _atomic_write_json(PARTIAL_FEASIBILITY_PATH, {**feasibility, "complete": False})
 
         try:
@@ -477,6 +513,7 @@ def main() -> None:
                     request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
                     record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
                     feasibility["cells"][key] = record
+                    current_segment["cells_completed_this_segment"] += 1
                     checkpoint_partial()
                     print(
                         json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}),
@@ -487,7 +524,9 @@ def main() -> None:
                         continue  # already completed before an interruption
                     record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
                     feasibility["semantic"][request.request_id] = record
+                    current_segment["semantic_completed_this_segment"] += 1
                     checkpoint_partial()
+                current_segment["attention_session_evidence"] = session.metadata()
         finally:
             # The typeperf child must never outlive a propagated error or an
             # interruption; the success path stops here as well.
@@ -495,23 +534,26 @@ def main() -> None:
         feasibility["complete"] = True
         _atomic_write_json(feasibility_path, feasibility)
         PARTIAL_FEASIBILITY_PATH.unlink(missing_ok=True)
+        current_segment["wddm_telemetry_coverage"] = telemetry.coverage()
         provenance = {
             "action": "preflight",
             "binding": binding,
-            "attention_session_evidence": session.metadata(),
+            "attention_session_evidence": current_segment.get("attention_session_evidence", session.metadata()),
             "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
             "physical_vram_bytes": physical_bytes,
             "wddm_telemetry_coverage": telemetry.coverage(),
             "resumed_units": resumed_units,
+            "segments": feasibility["segments"],
+            "wddm_telemetry_coverage_aggregate": aggregate_segment_coverage(feasibility["segments"]),
             "wddm_telemetry_mechanism": (
                 "continuous per-PID GPU Process Memory Shared Usage via typeperf; spill = in-window peak above pre-window baseline for this process; "
-                "runtime truth is in wddm_telemetry_coverage (available, degraded_reason, windows_with_telemetry)"
+                "runtime truth is wddm_telemetry_coverage (this segment) and wddm_telemetry_coverage_aggregate (all segments)"
             ),
         }
         # Phase-specific provenance files preserve both RuntimeSession records;
         # measure never overwrites the preflight evidence.
         (OUTPUT_DIR / "provenance_preflight.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"]), "resumed_units": resumed_units}, indent=2))
+        print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"]), "resumed_units": resumed_units, "segments": len(feasibility["segments"])}, indent=2))
         return
 
     # measure: re-verify the preflight binding before trusting any of it.
