@@ -9,12 +9,12 @@ seed. The output JSONL is committed; its SHA-256 is recorded in the frozen
 contract.
 """
 
-
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+from collections import Counter
 from pathlib import Path
 
 from athrub.a0_data import GENERATOR_VERSION, generate_decisions
@@ -77,6 +77,7 @@ def verify_no_development_overlap(requests: list[DecisionRequest]) -> None:
     for request in requests:
         if request.metadata.get("suite") == "semantic":
             assert request.metadata["seed"] not in DEVELOPMENT_SEEDS
+            assert SEMANTIC_CANDIDATE_RANGE[0] <= len(request.candidates) <= SEMANTIC_CANDIDATE_RANGE[1]
             continue
         prefix = request.metadata["prefix_units"]
         count = len(request.candidates)
@@ -87,7 +88,10 @@ def verify_no_development_overlap(requests: list[DecisionRequest]) -> None:
     identifiers = [request.request_id for request in requests]
     assert len(identifiers) == len(set(identifiers)) == 42
     families = [r.metadata["task_family"] for r in requests if r.metadata.get("suite") == "semantic"]
-    assert len(families) == 24 and len(set(families)) == 8
+    family_counts = Counter(families)
+    assert len(families) == SEMANTIC_RECORDS
+    assert len(family_counts) == 8
+    assert all(count == 3 for count in family_counts.values())
 
 
 def main() -> None:
