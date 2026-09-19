@@ -39,11 +39,19 @@
     "prefix_units": [128, 512, 1024],
     "candidate_counts": [2, 8, 32],
     "paths": ["flat-sequential", "flat-batched", "shared-sequential", "shared-batched"],
+    "sequential_definition": "flat-sequential and shared-sequential mean candidate chunk size = 1",
     "batched_chunk_size": "min(max_safe_flat, max_safe_shared, K), established by the feasibility probe per cell"
   },
   "chunking": {
     "feasibility_chunk_candidates": [1, 2, 4, 8, 16, 32, 64, 128],
+    "feasibility_candidates_clipped_to_K": true,
     "full_K_probe_for_K_255": true,
+    "flat_chunk_semantics": "flat chunks recompute the complete prefix+candidate paths for each chunk",
+    "feasibility_discipline": {
+      "model_residency": "only one FP32 model pair resident per probe",
+      "before_each_probe": "clear allocator cache and reset peak memory statistics",
+      "chunk1_unsafe_rule": "if chunk = 1 is unsafe for either primary path, mark the cell hardware_infeasible; never substitute another prefix; applies equally at prefix 8192"
+    },
     "safety_thresholds": {
       "peak_allocated_le_fraction_of_physical_vram": 0.9,
       "peak_reserved_le_fraction_of_physical_vram": 0.95,
@@ -60,7 +68,7 @@
   },
   "execution_order": {
     "cell_order_seed": 271828,
-    "path_order": "alternating flat/shared execution order"
+    "path_order": "alternate by measured repeat: flat -> shared, then shared -> flat, repeating"
   },
   "correctness_gate": {
     "comparison": "candidate_path_vs_reference_flat",

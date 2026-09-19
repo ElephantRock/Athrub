@@ -33,8 +33,9 @@ dropped.
 
 ## Chunking and feasibility (ratified policy)
 
-Feasibility chunk candidates per cell: `1, 2, 4, 8, 16, 32, 64, 128`, plus a
-full-K probe for K=255. A chunk size is **safe** iff all of:
+Feasibility chunk candidates per cell: `1, 2, 4, 8, 16, 32, 64, 128` **clipped
+to <= K**, plus a full-K probe for K=255. Flat chunks recompute the complete
+prefix+candidate paths for each chunk. A chunk size is **safe** iff all of:
 
 ```text
 peak allocated <= 90% of physical CUDA VRAM
@@ -42,6 +43,12 @@ peak reserved  <= 95% of physical CUDA VRAM
 no OOM or execution error
 no observed WDDM/shared-memory spill
 ```
+
+Feasibility discipline (verbatim from the Issue #15 review): before each probe,
+**only one FP32 model pair is resident**, the allocator cache is cleared, and
+peak memory statistics are reset. **If chunk = 1 is unsafe for either primary
+path, the cell is marked `hardware_infeasible`; another prefix is never
+substituted; this applies equally at prefix 8192.**
 
 - Attribution cells run four paths: **flat-sequential, flat-batched,
   shared-sequential, shared-batched**, where both batched paths use the same
@@ -62,6 +69,7 @@ K                 2, 8, 32
 paths             flat-sequential, flat-batched, shared-sequential, shared-batched
 ```
 
+`flat-sequential` and `shared-sequential` mean **candidate chunk size = 1**.
 This separates ordinary batching improvements from shared-computation effects,
 per the Phase 1 requirement that optimized-flat serve as a control.
 
@@ -69,7 +77,8 @@ per the Phase 1 requirement that optimized-flat serve as a control.
 
 ```text
 cell order seed   271828 (deterministic shuffled cell order)
-path order        alternating flat/shared execution order
+path order        alternate by measured repeat: flat -> shared, then shared -> flat,
+                  repeating
 ```
 
 ## Cadence
