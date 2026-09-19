@@ -18,6 +18,7 @@ failure budget).
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import subprocess
@@ -102,13 +103,6 @@ def _timed_score_one(backend, request: DecisionRequest):
     return result, (time.perf_counter_ns() - start) / 1_000_000.0
 
 
-def _release(*objects) -> None:
-    for obj in objects:
-        del obj
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-
 def _outputs(result) -> dict[str, Any]:
     return {
         "logits": list(result.logits),
@@ -168,8 +162,15 @@ def main() -> None:
     fp32_tol = float(contract["fp32_precondition"]["max_abs_probability_delta_lt"])
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        execution_git_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, check=True
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        execution_git_sha = None
     provenance = {
         "contract_version": contract["contract_version"],
+        "execution_git_sha": execution_git_sha,
         "manifest_sha256_raw": manifest_sha,
         "reference_manifest_sha256": sha256_path(RUN1 / "reference_manifest.json"),
         "attention_policy": policy.as_record(),
@@ -236,7 +237,15 @@ def main() -> None:
             }
             (OUTPUT_DIR / "summary.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             raise SystemExit("FP32 architecture control failed; BF16 adjudication stopped per contract")
-        _release(flat32, shared32)
+        del flat32, shared32
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        post_fp32_release_memory = {
+            "cuda_memory_allocated_bytes": int(torch.cuda.memory_allocated()),
+            "cuda_memory_reserved_bytes": int(torch.cuda.memory_reserved()),
+        }
+        print(f"phase transition (FP32 pair released): {post_fp32_release_memory}", flush=True)
 
         # ---------------- phase 2: BF16 adjudication ----------------
         flat16, shared16 = _load_pair(torch.bfloat16)
@@ -289,16 +298,21 @@ def main() -> None:
                     "outputs": {"F_flat_fp32": f_payload, "A_flat_bf16": _outputs(a_result), "B_shared_bf16": _outputs(b_result)},
                 }
             )
-        _release(flat16, shared16)
+        del flat16, shared16
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     (OUTPUT_DIR / "rows.jsonl").write_text(
         "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8"
     )
     inside = sum(row["inside_ambiguity_region"] for row in rows)
+    flips = [row for row in rows if not row["b_argmax_equal"]]
     summary = {
         "contract_version": contract["contract_version"],
         "rows": len(rows),
         "fp32_precondition_pass": True,
+        "post_fp32_release_memory": post_fp32_release_memory,
         "bf16_probability_gate_pass": all(row["b_probability_gate_pass"] for row in rows),
         "bf16_tv_gate_pass": all(row["b_tv_gate_pass"] for row in rows),
         "decision_rule_pass": all(row["b_decision_rule_pass"] for row in rows),
@@ -307,10 +321,16 @@ def main() -> None:
         "exact_b_f_argmax_agreement": sum(row["b_argmax_equal"] for row in rows) / len(rows),
         "rows_inside_ambiguity_region": inside,
         "rows_outside_ambiguity_region": len(rows) - inside,
+        "argmax_flips": [row["request_id"] for row in flips],
         "permitted_flips": [
             {"request_id": row["request_id"], "regret": row["oracle_decision_regret"]}
-            for row in rows
-            if not row["b_argmax_equal"]
+            for row in flips
+            if row["inside_ambiguity_region"]
+        ],
+        "unpermitted_flips": [
+            {"request_id": row["request_id"], "regret": row["oracle_decision_regret"]}
+            for row in flips
+            if not row["inside_ambiguity_region"]
         ],
         "failing_rows": [row["request_id"] for row in rows if not row["b_row_pass"]],
         "shared_bf16_operational_status": "SUPPORTED"
