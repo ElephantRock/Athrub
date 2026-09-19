@@ -237,7 +237,10 @@ def main() -> None:
             }
             (OUTPUT_DIR / "summary.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             raise SystemExit("FP32 architecture control failed; BF16 adjudication stopped per contract")
-        del flat32, shared32
+        # The phase-0 remeasure loop leaves `backend` (and `name`) bound to the
+        # shared FP32 backend; those references keep the model alive just like
+        # the original helper bug did, so they are deleted alongside the pairs.
+        del flat32, shared32, backend, name
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
