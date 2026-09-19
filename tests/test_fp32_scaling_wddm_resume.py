@@ -203,3 +203,31 @@ def test_aggregate_segment_coverage_sums_all_segments() -> None:
     assert aggregate["windows_with_telemetry"] == 13
     assert aggregate["windows_without_telemetry"] == 2
     assert aggregate["samples"] == 130
+
+
+def test_interrupted_segment_checkpoint_carries_both_evidence_kinds() -> None:
+    # Regression for PR #17 comment 5745125546: session evidence used to be
+    # written only at clean segment exit, so a crash mid-segment left the
+    # checkpoint without RuntimeSession evidence. The checkpoint snapshot must
+    # persist both WDDM coverage and session metadata at every write.
+    from athrub.scaling import apply_segment_checkpoint_snapshot
+
+    segment = {"segment_id": "segment-x", "cells_completed_this_segment": 3}
+    coverage = {"available": True, "windows_opened": 20, "windows_with_telemetry": 18}
+    session_evidence = {
+        "requested_attention_policy": {"backend": "efficient_sdpa"},
+        "query_head_count": 16,
+        "kv_head_count": 8,
+        "gqa_expansion_ratio": 2,
+        "gqa_expansion_calls": 500,
+    }
+    # Mid-segment checkpoint (crash happens right after this write).
+    snapshot = apply_segment_checkpoint_snapshot(segment, coverage, session_evidence)
+    assert snapshot is segment
+    assert snapshot["wddm_telemetry_coverage"] == coverage
+    assert snapshot["attention_session_evidence"] == session_evidence
+    # A checkpoint before the session exists must still persist coverage and
+    # simply not fabricate session evidence.
+    early = apply_segment_checkpoint_snapshot({"segment_id": "y"}, coverage, None)
+    assert early["wddm_telemetry_coverage"] == coverage
+    assert "attention_session_evidence" not in early

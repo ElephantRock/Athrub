@@ -36,6 +36,7 @@ from athrub.scaling import (
     WddmSharedUsageMonitor,
     a2_performance_verdict,
     aggregate_segment_coverage,
+    apply_segment_checkpoint_snapshot,
     chunk_safety,
     clip_chunk_candidates,
     deterministic_cell_order,
@@ -499,12 +500,20 @@ def main() -> None:
             # Durable checkpoint after every completed unit: atomic replace,
             # explicitly incomplete, so a crash costs at most the current cell
             # while partial evidence can never enter measurement. The current
-            # segment's telemetry coverage snapshot rides along.
-            current_segment["wddm_telemetry_coverage"] = telemetry.coverage()
+            # segment's telemetry coverage AND RuntimeSession evidence are
+            # snapshotted here, so an interrupted segment's checkpoint carries
+            # both — session evidence must not depend on reaching clean exit.
+            apply_segment_checkpoint_snapshot(
+                current_segment,
+                telemetry.coverage(),
+                session_holder["session"].metadata() if session_holder["session"] is not None else None,
+            )
             _atomic_write_json(PARTIAL_FEASIBILITY_PATH, {**feasibility, "complete": False})
 
+        session_holder: dict[str, Any] = {"session": None}
         try:
             with attention_runtime(policy) as session:
+                session_holder["session"] = session
                 session.observe_model_config(flat.model.config)
                 for cell in ordered_cells:
                     key = f"p{cell[0]}-k{cell[1]}"
@@ -528,6 +537,7 @@ def main() -> None:
                     checkpoint_partial()
                 current_segment["attention_session_evidence"] = session.metadata()
         finally:
+            session_holder["session"] = None
             # The typeperf child must never outlive a propagated error or an
             # interruption; the success path stops here as well.
             telemetry.stop()

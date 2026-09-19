@@ -863,6 +863,25 @@ class WddmSharedUsageMonitor:
         }
 
 
+def apply_segment_checkpoint_snapshot(
+    segment: dict[str, Any],
+    telemetry_coverage: dict[str, Any],
+    session_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Snapshot both durable evidence kinds into a segment before each write.
+
+    WDDM coverage and the attention RuntimeSession evidence must be captured
+    at every checkpoint, not only at clean segment exit: an interrupted
+    segment's saved checkpoint must already carry both, which is the entire
+    point of durable resume.
+    """
+
+    segment["wddm_telemetry_coverage"] = telemetry_coverage
+    if session_metadata is not None:
+        segment["attention_session_evidence"] = session_metadata
+    return segment
+
+
 def aggregate_segment_coverage(segments: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate WDDM coverage across all preflight process segments.
 
