@@ -44,7 +44,9 @@ from athrub.scaling import (
     repeat_alternation,
     require_complete_feasibility,
     resolve_anchor_set,
+    resume_partial_feasibility,
     shared_chunked_score,
+    stop_reason,
     suite_membership,
     verdict_thresholds,
     verify_feasibility_binding,
@@ -143,12 +145,42 @@ def grid_request(prefix: int, k: int, candidate_units: int) -> DecisionRequest:
     )
 
 
+class WddmTelemetry:
+    """Samples the Windows GPU Process Memory 'Shared Usage' counter.
+
+    This is the external WDDM paging signal the v0.2 contract names: a probe
+    during which total shared usage rises above its pre-probe baseline is
+    observing shared-memory paging, independent of PyTorch's internal
+    allocated/reserved counters. Sampling is best-effort; a counter failure
+    yields None and the spill input degrades to the internal
+    reserved-beyond-physical signal only.
+    """
+
+    def __init__(self) -> None:
+        self._script = (
+            "(Get-Counter '\\GPU Process Memory(*)\\Shared Usage' -SampleInterval 1 -MaxSamples 1 "
+            "-ErrorAction Stop).CounterSamples | Where-Object { $_.CookedValue -gt 0 } | "
+            "Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"
+        )
+
+    def sample(self) -> int | None:
+        try:
+            output = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", self._script],
+                capture_output=True, text=True, timeout=30, check=True,
+            )
+            return int(float(output.stdout.strip()))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+
+
 def probe_cell(
     flat: FlatReferenceBackend,
     shared: SharedContextBackend,
     request: DecisionRequest,
     contract: dict[str, Any],
     physical_bytes: int,
+    telemetry: WddmTelemetry | None = None,
 ) -> dict[str, Any]:
     thresholds = contract["chunking"]["safety_thresholds"]
     candidates = clip_chunk_candidates(
@@ -181,6 +213,7 @@ def probe_cell(
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
+            shared_baseline = telemetry.sample() if telemetry is not None else None
             try:
                 if path_name == "flat":
                     flat_chunked_score(flat, request, chunk)
@@ -190,12 +223,15 @@ def probe_cell(
                 # region so asynchronous OOMs attribute to this probe.
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
+                shared_peak = telemetry.sample() if telemetry is not None else None
                 decision = chunk_safety(
                     int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None,
                     int(torch.cuda.max_memory_reserved()) if torch.cuda.is_available() else None,
                     physical_bytes,
                     thresholds["peak_allocated_le_fraction_of_physical_vram"],
                     thresholds["peak_reserved_le_fraction_of_physical_vram"],
+                    external_shared_usage_bytes=shared_peak,
+                    external_shared_baseline_bytes=shared_baseline,
                 )
                 decision["status"] = "safe" if decision["safe"] else "unsafe"
             except (torch.OutOfMemoryError, RuntimeError) as exception:
@@ -204,12 +240,12 @@ def probe_cell(
                 # any other error propagates untouched.
                 if not is_oom_exception(exception):
                     raise
-                decision = {"safe": False, "status": "oom", "spill_observed": None}
+                decision = {"safe": False, "status": "oom", "spill_observed": None, "stop_cause": "oom"}
             row[path_name] = decision
             if decision["safe"] and chunk not in probe_only:
                 max_safe[path_name] = max(max_safe[path_name], chunk)
             if is_memory_stop_decision(decision):
-                stopped[path_name] = {"chunk": chunk, "reason": str(decision["status"])}
+                stopped[path_name] = {"chunk": chunk, "reason": stop_reason(decision)}
         records.append(row)
     return {
         "request_id": request.request_id,
@@ -412,7 +448,29 @@ def main() -> None:
     feasibility_path = OUTPUT_DIR / "feasibility.json"
 
     if args.action == "preflight":
+        ordered_cells = deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"])
+        semantic_ids = [request.request_id for request in semantic_requests()]
+        expected_cell_keys = [f"p{cell[0]}-k{cell[1]}" for cell in ordered_cells]
         feasibility: dict[str, Any] = {"binding": binding, "cells": {}, "semantic": {}}
+        telemetry = WddmTelemetry()
+        resumed_units = 0
+        if PARTIAL_FEASIBILITY_PATH.is_file():
+            # Resume an interrupted preflight: the checkpoint's binding must
+            # match this execution exactly, otherwise it is stale and discarded.
+            try:
+                state = resume_partial_feasibility(
+                    json.loads(PARTIAL_FEASIBILITY_PATH.read_text(encoding="utf-8")),
+                    binding,
+                    expected_cell_keys,
+                    semantic_ids,
+                )
+            except ValueError as exc:
+                print(json.dumps({"checkpoint_rejected": str(exc), "action": "fresh preflight"}), flush=True)
+            else:
+                feasibility["cells"] = state["cells"]
+                feasibility["semantic"] = state["semantic"]
+                resumed_units = state["resumed_units"]
+                print(json.dumps({"checkpoint_resumed_units": resumed_units}), flush=True)
 
         def checkpoint_partial() -> None:
             # Durable checkpoint after every completed unit: atomic replace,
@@ -422,17 +480,22 @@ def main() -> None:
 
         with attention_runtime(policy) as session:
             session.observe_model_config(flat.model.config)
-            for cell in deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"]):
+            for cell in ordered_cells:
+                key = f"p{cell[0]}-k{cell[1]}"
+                if key in feasibility["cells"]:
+                    continue  # already completed before an interruption; skip in order
                 request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
-                record = probe_cell(flat, shared, request, contract, physical_bytes)
-                feasibility["cells"][f"p{cell[0]}-k{cell[1]}"] = record
+                record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
+                feasibility["cells"][key] = record
                 checkpoint_partial()
                 print(
                     json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}),
                     flush=True,
                 )
             for request in semantic_requests():
-                record = probe_cell(flat, shared, request, contract, physical_bytes)
+                if request.request_id in feasibility["semantic"]:
+                    continue  # already completed before an interruption
+                record = probe_cell(flat, shared, request, contract, physical_bytes, telemetry)
                 feasibility["semantic"][request.request_id] = record
                 checkpoint_partial()
         feasibility["complete"] = True
@@ -444,11 +507,13 @@ def main() -> None:
             "attention_session_evidence": session.metadata(),
             "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
             "physical_vram_bytes": physical_bytes,
+            "resumed_units": resumed_units,
+            "wddm_telemetry": "GPU Process Memory Shared Usage sampled per probe; spill = shared usage above pre-probe baseline",
         }
         # Phase-specific provenance files preserve both RuntimeSession records;
         # measure never overwrites the preflight evidence.
         (OUTPUT_DIR / "provenance_preflight.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"])}, indent=2))
+        print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"]), "resumed_units": resumed_units}, indent=2))
         return
 
     # measure: re-verify the preflight binding before trusting any of it.

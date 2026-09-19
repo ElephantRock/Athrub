@@ -19,7 +19,9 @@ from athrub.scaling import (
     repeat_alternation,
     require_complete_feasibility,
     resolve_anchor_set,
+    resume_partial_feasibility,
     shared_chunked_score,
+    stop_reason,
     suite_membership,
     verdict_thresholds,
     verify_feasibility_binding,
@@ -381,3 +383,57 @@ def test_protocol_v02_amends_v01_solely() -> None:
     assert strip(v01) == strip(v02)
     # The grid is untouched: 4096/8192 remain; no post-hoc pruning.
     assert v02["grids"]["prefix_units"] == [128, 512, 1024, 2048, 4096, 8192]
+
+
+def test_chunk_safety_stop_causes_and_external_spill() -> None:
+    physical = 12 * 1024**3
+    safe = chunk_safety(int(0.5 * physical), int(0.9 * physical), physical, 0.9, 0.95)
+    assert safe["safe"] is True and safe["stop_cause"] == "none"
+    allocated = chunk_safety(int(0.95 * physical), int(0.9 * physical), physical, 0.9, 0.95)
+    assert allocated["safe"] is False and allocated["stop_cause"] == "allocated_threshold"
+    reserved = chunk_safety(int(0.5 * physical), int(0.97 * physical), physical, 0.9, 0.95)
+    assert reserved["safe"] is False and reserved["stop_cause"] == "reserved_threshold"
+    # External WDDM shared usage above baseline stops the ladder even when the
+    # internal thresholds are satisfied — this is the attempt-1 failure signal.
+    spill = chunk_safety(int(0.5 * physical), int(0.9 * physical), physical, 0.9, 0.95,
+                         external_shared_usage_bytes=16 * 1024**3, external_shared_baseline_bytes=80 * 1024**2)
+    assert spill["safe"] is False and spill["stop_cause"] == "wddm_shared_spill"
+    assert spill["spill_observed"] is True
+    # A matching baseline (desktop noise) is not a probe-attributable spill.
+    noise = chunk_safety(int(0.5 * physical), int(0.9 * physical), physical, 0.9, 0.95,
+                         external_shared_usage_bytes=80 * 1024**2, external_shared_baseline_bytes=80 * 1024**2)
+    assert noise["safe"] is True
+    beyond = chunk_safety(int(0.5 * physical), int(1.1 * physical), physical, 0.9, 0.95)
+    # Reserved beyond physical necessarily violates the 95% threshold first, so
+    # the named cause is reserved_threshold; beyond-physical is the spill flag.
+    assert beyond["stop_cause"] == "reserved_threshold"
+    assert beyond["spill_observed"] is True
+
+
+def test_stop_reason_names_concrete_cause() -> None:
+    assert stop_reason({"status": "oom", "stop_cause": "oom"}) == "oom"
+    assert stop_reason({"status": "unsafe", "stop_cause": "wddm_shared_spill"}) == "wddm_shared_spill"
+    assert stop_reason({"status": "unsafe", "stop_cause": "allocated_threshold"}) == "allocated_threshold"
+    # Legacy-shaped decisions without stop_cause degrade to status, never "unsafe" silently.
+    assert stop_reason({"status": "unsafe"}) == "unsafe"
+
+
+def test_resume_partial_feasibility_contract() -> None:
+    binding = feasibility_binding("sha-a", "sha-b", "sha-c", "sha-d", {"backend": "x"}, 12, "616.64", "2.11.0")
+    partial = {
+        "binding": dict(binding),
+        "complete": False,
+        "cells": {"p128-k2": {"request_id": "scale-p128-k2-c16"}},
+        "semantic": {"a0-route-cost-x": {"request_id": "a0-route-cost-x"}},
+    }
+    state = resume_partial_feasibility(partial, binding, ["p128-k2", "p512-k4"], ["a0-route-cost-x"])
+    assert state["resumed_units"] == 2 and "p128-k2" in state["cells"]
+    stale = {**partial, "binding": {**binding, "execution_git_sha": "other"}}
+    with pytest.raises(ValueError, match="binding mismatch"):
+        resume_partial_feasibility(stale, binding, ["p128-k2"], ["a0-route-cost-x"])
+    complete = {**partial, "complete": True}
+    with pytest.raises(ValueError, match="only to interrupted preflights"):
+        resume_partial_feasibility(complete, binding, ["p128-k2"], ["a0-route-cost-x"])
+    unknown = {**partial, "cells": {"p9999-k2": {}}}
+    with pytest.raises(ValueError, match="unknown cell"):
+        resume_partial_feasibility(unknown, binding, ["p128-k2"], ["a0-route-cost-x"])

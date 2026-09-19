@@ -194,19 +194,47 @@ def chunk_safety(
     physical_total_bytes: int,
     allocated_fraction: float,
     reserved_fraction: float,
+    external_shared_usage_bytes: int | None = None,
+    external_shared_baseline_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Apply the frozen safety thresholds; reserved beyond physical is spill."""
+    """Apply the frozen safety thresholds with explicit stop causes.
+
+    The WDDM/shared-memory spill condition is the Windows GPU Process Memory
+    ``Shared Usage`` measurement (as observed externally), optionally delta'd
+    against a pre-probe baseline so desktop paging noise does not trip the
+    rule; reserved beyond physical remains a secondary internal signal. The
+    returned ``stop_cause`` names the concrete first violated condition:
+    allocated_threshold, reserved_threshold, wddm_shared_spill,
+    reserved_beyond_physical, or none when safe.
+    """
 
     if peak_allocated_bytes is None or peak_reserved_bytes is None:
-        return {"safe": False, "spill_observed": None, "reason": "no-memory-statistics"}
-    spill = peak_reserved_bytes > physical_total_bytes
+        return {"safe": False, "spill_observed": None, "stop_cause": "no_memory_statistics"}
     within_allocated = peak_allocated_bytes <= allocated_fraction * physical_total_bytes
     within_reserved = peak_reserved_bytes <= reserved_fraction * physical_total_bytes
+    reserved_beyond_physical = peak_reserved_bytes > physical_total_bytes
+    external_spill = False
+    if external_shared_usage_bytes is not None:
+        baseline = external_shared_baseline_bytes or 0
+        external_spill = (external_shared_usage_bytes - baseline) > 0
+    if not within_allocated:
+        stop_cause = "allocated_threshold"
+    elif not within_reserved:
+        stop_cause = "reserved_threshold"
+    elif external_spill:
+        stop_cause = "wddm_shared_spill"
+    elif reserved_beyond_physical:
+        stop_cause = "reserved_beyond_physical"
+    else:
+        stop_cause = "none"
     return {
-        "safe": bool(within_allocated and within_reserved and not spill),
-        "spill_observed": bool(spill),
+        "safe": bool(within_allocated and within_reserved and not external_spill and not reserved_beyond_physical),
+        "spill_observed": bool(external_spill or reserved_beyond_physical),
+        "stop_cause": stop_cause,
         "peak_allocated_bytes": int(peak_allocated_bytes),
         "peak_reserved_bytes": int(peak_reserved_bytes),
+        "external_shared_usage_bytes": external_shared_usage_bytes,
+        "external_shared_baseline_bytes": external_shared_baseline_bytes,
     }
 
 
@@ -482,6 +510,17 @@ def is_memory_stop_decision(decision: dict[str, Any]) -> bool:
     return bool(decision.get("safe")) is False and status in {"unsafe"}
 
 
+def stop_reason(decision: dict[str, Any]) -> str:
+    """Concrete ladder-stop cause: OOM kind or the threshold decision's stop_cause."""
+
+    if decision.get("status") == "oom":
+        return "oom"
+    cause = decision.get("stop_cause")
+    if isinstance(cause, str) and cause not in {"", "none", "no_memory_statistics"}:
+        return cause
+    return str(decision.get("status", "unknown"))
+
+
 def require_complete_feasibility(record: dict[str, Any]) -> None:
     """Reject any feasibility artifact not marked complete by a full preflight."""
 
@@ -490,3 +529,41 @@ def require_complete_feasibility(record: dict[str, Any]) -> None:
             "feasibility artifact is incomplete (complete != true); "
             "partial preflight evidence is categorically inadmissible for measurement"
         )
+
+
+def resume_partial_feasibility(
+    partial: dict[str, Any],
+    binding: dict[str, Any],
+    expected_cell_keys: list[str],
+    expected_semantic_ids: list[str],
+) -> dict[str, Any]:
+    """Validate a complete:false checkpoint against the current binding for resume.
+
+    Returns a state dict {cells, semantic, resumed_units} carrying forward all
+    previously completed units; raises ValueError when the checkpoint's binding
+    does not exactly match (stale evidence must not be resumed) or when the
+    checkpoint claims completeness (resume is only for interrupted preflights).
+    """
+
+    if partial.get("complete") is True:
+        raise ValueError("checkpoint is marked complete; resume applies only to interrupted preflights")
+    mismatches = verify_feasibility_binding(partial, binding)
+    if mismatches:
+        raise ValueError(f"checkpoint binding mismatch: {mismatches}")
+    cells = partial.get("cells", {})
+    semantic = partial.get("semantic", {})
+    for key in cells:
+        if key not in expected_cell_keys:
+            raise ValueError(f"checkpoint carries unknown cell: {key}")
+    for request_id in semantic:
+        if request_id not in expected_semantic_ids:
+            raise ValueError(f"checkpoint carries unknown semantic request: {request_id}")
+    return {"cells": cells, "semantic": semantic, "resumed_units": len(cells) + len(semantic)}
+
+
+def resolve_complete_feasibility_state(record: dict[str, Any]) -> str:
+    """Human-readable completeness state for reporting."""
+
+    if record.get("complete") is True:
+        return "complete"
+    return f"partial ({len(record.get('cells', {}))} cells, {len(record.get('semantic', {}))} semantic)"
