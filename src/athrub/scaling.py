@@ -300,22 +300,104 @@ def resolve_anchor_set(
     }
 
 
-def a2_performance_verdict(anchor_speedups: Sequence[float], unique_anchor_count: int) -> dict[str, Any]:
-    """Geometric-mean anchor speedup bands; <4 anchors disables both verdicts."""
+def suite_membership(
+    cell: tuple[int, int],
+    anchor_cells: Sequence[tuple[int, int]],
+    attribution_prefixes: Sequence[int],
+    attribution_candidate_counts: Sequence[int],
+) -> list[str]:
+    """Independent suite membership: every feasible cell is primary; overlaps allowed."""
+
+    suites = ["primary"]
+    if cell[0] in attribution_prefixes and cell[1] in attribution_candidate_counts:
+        suites.append("attribution")
+    if cell in list(anchor_cells):
+        suites.append("anchor")
+    return suites
+
+
+def feasibility_binding(
+    execution_git_sha: str | None,
+    contract_sha256: str,
+    issue11_manifest_sha256: str,
+    reference_manifest_sha256: str,
+    attention_policy: dict[str, Any],
+    physical_vram_bytes: int,
+    driver_version: str | None,
+    torch_version: str,
+) -> dict[str, Any]:
+    """Binding block embedded in feasibility evidence and re-verified at measure time."""
+
+    return {
+        "execution_git_sha": execution_git_sha,
+        "contract_sha256": contract_sha256,
+        "issue11_manifest_sha256": issue11_manifest_sha256,
+        "reference_manifest_sha256": reference_manifest_sha256,
+        "attention_policy": attention_policy,
+        "physical_vram_bytes": physical_vram_bytes,
+        "driver_version": driver_version,
+        "torch_version": torch_version,
+    }
+
+
+def verify_feasibility_binding(record: dict[str, Any], expected: dict[str, Any]) -> list[str]:
+    """Return the list of binding mismatches; empty means the evidence is admissible."""
+
+    mismatches = []
+    for key, expected_value in expected.items():
+        actual_value = record.get("binding", {}).get(key)
+        if actual_value != expected_value:
+            mismatches.append(f"{key}: {actual_value!r} != {expected_value!r}")
+    return mismatches
+
+
+def a2_performance_verdict(
+    anchor_speedups: Sequence[float],
+    unique_anchor_count: int,
+    *,
+    correctness_all_pass: bool,
+    vram_acceptable: bool,
+    measured_work_evidence: bool,
+    strong_threshold: float,
+    conditional_threshold: float,
+    minimum_anchors: int,
+) -> dict[str, Any]:
+    """Geometric-mean anchor speedup bands under the full frozen gate.
+
+    The band is arithmetic; the A2 performance verdict additionally requires
+    correctness on every measured cell, acceptable VRAM, at least the minimum
+    unique anchors, and — for the conditional band only — independent measured
+    work evidence. Thresholds are supplied by the caller from the frozen
+    contract; none are defaulted here.
+    """
 
     if not anchor_speedups:
         raise ValueError("anchor speedups must not be empty")
     mean_speedup = geometric_mean(anchor_speedups)
-    if mean_speedup >= 2.0:
+    if mean_speedup >= strong_threshold:
         band = "strong"
-    elif mean_speedup >= 1.5:
+    elif mean_speedup >= conditional_threshold:
         band = "conditional"
     else:
         band = "runtime_bottleneck"
-    enabled = unique_anchor_count >= 4
+    gates = {
+        "anchor_minimum_met": unique_anchor_count >= minimum_anchors,
+        "correctness_all_pass": correctness_all_pass,
+        "vram_acceptable": vram_acceptable,
+        "measured_work_evidence": measured_work_evidence,
+    }
+    enabled = gates["anchor_minimum_met"] and gates["correctness_all_pass"] and gates["vram_acceptable"]
+    if not enabled:
+        verdict = "disabled_" + "_".join(
+            name for name, passed in gates.items() if not passed and name != "measured_work_evidence"
+        )
+    elif band == "conditional" and not measured_work_evidence:
+        verdict = "conditional_pending_measured_work_evidence"
+    else:
+        verdict = band
     return {
         "geometric_mean_candidates_per_s_speedup": mean_speedup,
         "band": band,
-        "verdicts_enabled": enabled,
-        "a2_performance_verdict": band if enabled else "disabled_fewer_than_four_unique_anchors",
+        "gates": gates,
+        "a2_performance_verdict": verdict,
     }

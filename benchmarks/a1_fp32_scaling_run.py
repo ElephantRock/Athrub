@@ -2,10 +2,11 @@
 
 GPU-gated: without a subcommand this prints the frozen plan and exits.
 ``preflight`` runs the resource-only feasibility probes (decision outputs are
-discarded unread); ``measure`` runs the timed campaign (correctness, latency,
-memory, anchor resolution, A2 fields). Both require explicit authorization.
-All constants come from configs/a1_fp32_scaling.v0.1.json; this runner changes
-none of them.
+discarded unread) over all grid cells AND the 24 semantic rows, embedding a
+binding block in feasibility.json. ``measure`` re-verifies that binding before
+trusting the evidence, then runs the timed campaign with per-path FP32
+correctness gates. The K=255 full-K probe is probe-only and can never become
+the operational chunk. All constants come from the frozen contract.
 """
 
 # Executable src-layout imports are intentionally grouped by dependency boundary.
@@ -34,11 +35,14 @@ from athrub.scaling import (
     chunk_safety,
     clip_chunk_candidates,
     deterministic_cell_order,
+    feasibility_binding,
     flat_chunked_score,
     latency_percentiles,
     repeat_alternation,
     resolve_anchor_set,
     shared_chunked_score,
+    suite_membership,
+    verify_feasibility_binding,
 )
 from athrub.shared_context import SharedContextBackend
 from athrub.workloads import synthetic_request
@@ -70,8 +74,7 @@ def _git_sha() -> str | None:
 
 def load_contract() -> dict[str, Any]:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-    manifest_sha = hashlib.sha256(ISSUE11_MANIFEST.read_bytes()).hexdigest()
-    if manifest_sha != contract["semantic_confirmation"]["manifest_sha256"]:
+    if hashlib.sha256(ISSUE11_MANIFEST.read_bytes()).hexdigest() != contract["semantic_confirmation"]["manifest_sha256"]:
         raise SystemExit("Issue #11 semantic manifest hash mismatch; refusing to execute")
     if sha256_path(RUN1 / "reference_manifest.json") != contract["binding"]["reference_manifest_sha256"]:
         raise SystemExit("frozen A0 manifest hash mismatch; refusing to execute")
@@ -143,12 +146,15 @@ def probe_cell(
     candidates = clip_chunk_candidates(
         contract["chunking"]["feasibility_chunk_candidates"], len(request.candidates)
     )
+    probe_only: set[int] = set()
     if len(request.candidates) == 255 and contract["chunking"]["full_K_probe_for_K_255"]:
+        # The full-K run is probe-only: recorded, never selectable as the chunk.
         candidates.append(255)
+        probe_only.add(255)
     records = []
     max_safe = {"flat": 0, "shared": 0}
     for chunk in candidates:
-        row: dict[str, Any] = {"chunk": chunk}
+        row: dict[str, Any] = {"chunk": chunk, "probe_only": chunk in probe_only}
         for path_name in ("flat", "shared"):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -172,11 +178,11 @@ def probe_cell(
             except torch.OutOfMemoryError:
                 decision = {"safe": False, "status": "oom", "spill_observed": None}
             row[path_name] = decision
-            if decision["safe"]:
+            if decision["safe"] and chunk not in probe_only:
                 max_safe[path_name] = max(max_safe[path_name], chunk)
+        # The frozen probe set executes completely; intermediate OOMs are
+        # recorded per chunk and never truncate the sequence.
         records.append(row)
-        if row["flat"]["status"] == "oom" and row["shared"]["status"] == "oom":
-            break
     return {
         "request_id": request.request_id,
         "max_safe_flat": max_safe["flat"],
@@ -186,21 +192,40 @@ def probe_cell(
     }
 
 
-def _timed(score, backend, request, chunk) -> tuple[Any, float, dict[str, int]]:
+def _binding_block(policy: AttentionPolicy, physical_bytes: int) -> dict[str, Any]:
+    return feasibility_binding(
+        execution_git_sha=_git_sha(),
+        contract_sha256=sha256_path(CONTRACT_PATH),
+        issue11_manifest_sha256=hashlib.sha256(ISSUE11_MANIFEST.read_bytes()).hexdigest(),
+        reference_manifest_sha256=sha256_path(RUN1 / "reference_manifest.json"),
+        attention_policy=policy.as_record(),
+        physical_vram_bytes=physical_bytes,
+        driver_version=_driver_version(),
+        torch_version=str(torch.__version__),
+    )
+
+
+def _timed(score, backend, request, chunk) -> tuple[float, int, int]:
+    """Measurement timing: synchronize and reset peak stats only.
+
+    Allocator cache clearing is deliberately absent — it would strip the warmed
+    allocator state that operational latency depends on. Resource probes keep
+    their own cache-clearing discipline.
+    """
+
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
     start = time.perf_counter_ns()
-    result = score(backend, request, chunk)
+    score(backend, request, chunk)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000.0
-    memory = {
-        "peak_allocated_bytes": int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None,
-        "peak_reserved_bytes": int(torch.cuda.max_memory_reserved()) if torch.cuda.is_available() else None,
-    }
-    return result, elapsed_ms, memory
+    return (
+        elapsed_ms,
+        int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else 0,
+        int(torch.cuda.max_memory_reserved()) if torch.cuda.is_available() else 0,
+    )
 
 
 def measure_cell(
@@ -212,19 +237,25 @@ def measure_cell(
     repeats: int,
     correctness_tolerance: float,
 ) -> dict[str, Any]:
-    """Measure named paths (name -> (score_fn, backend, chunk)) under the frozen rule.
+    """Measure named paths under the frozen alternation with correctness gates."""
 
-    Alternation is by measured repeat: the flat-family group and shared-family
-    group alternate going first (flat -> shared, then shared -> flat, repeating);
-    within a group, paths run in name order. Every path is timed once per repeat.
-    """
+    row: dict[str, Any] = {"request_id": request.request_id, "candidate_count": len(request.candidates)}
+    try:
+        reference = flat.score([request])[0]
+        correctness_available = True
+    except torch.OutOfMemoryError:
+        # The canonical oracle batch can OOM where chunks fit. Correctness is
+        # then unavailable and this cell's performance is inadmissible; the
+        # oracle is never silently replaced.
+        reference = None
+        correctness_available = False
+    row["correctness_available"] = correctness_available
+    if not correctness_available:
+        row["performance_admissible"] = False
+        return row
 
-    reference = flat.score([request])[0]
     flat_names = sorted(name for name in paths if name.startswith("flat"))
     shared_names = sorted(name for name in paths if name.startswith("shared"))
-    if len(flat_names) + len(shared_names) != len(paths):
-        raise ValueError("path names must start with 'flat' or 'shared'")
-
     results = {}
     for name, (score, backend, chunk) in paths.items():
         for _ in range(warmups):
@@ -232,34 +263,62 @@ def measure_cell(
         results[name] = score(backend, request, chunk)
 
     latencies: dict[str, list[float]] = {name: [] for name in paths}
-    memories: dict[str, list[dict[str, int | None]]] = {name: [] for name in paths}
+    peaks: dict[str, dict[str, int]] = {
+        name: {"peak_allocated_bytes": 0, "peak_reserved_bytes": 0} for name in paths
+    }
     for first, second in repeat_alternation(repeats):
         for group in (first, second):
             for name in flat_names if group == "flat" else shared_names:
                 score, backend, chunk = paths[name]
-                _, elapsed_ms, memory = _timed(score, backend, request, chunk)
+                elapsed_ms, peak_allocated, peak_reserved = _timed(score, backend, request, chunk)
                 latencies[name].append(elapsed_ms)
-                memories[name].append(memory)
+                peaks[name]["peak_allocated_bytes"] = max(peaks[name]["peak_allocated_bytes"], peak_allocated)
+                peaks[name]["peak_reserved_bytes"] = max(peaks[name]["peak_reserved_bytes"], peak_reserved)
 
-    row: dict[str, Any] = {"request_id": request.request_id, "candidate_count": len(request.candidates)}
     for name, (score, backend, chunk) in paths.items():
         metrics = compare_result(reference, results[name])
+        stats = latency_percentiles(latencies[name])
+        metadata = results[name].metadata
+        prefix_tokens = int(metadata["prefix_tokens"])
+        candidate_counts = [int(value) for value in metadata["candidate_token_counts"]]
+        flat_positions = sum(prefix_tokens + count for count in candidate_counts)
+        shared_positions = prefix_tokens + sum(candidate_counts)
         row[f"{name}_correctness"] = {
-            "max_abs_probability_delta": metrics.max_abs_probability_delta,
-            "argmax_equal": metrics.argmax_equal,
             "pass": metrics.max_abs_probability_delta < correctness_tolerance and metrics.argmax_equal,
             **{
                 key: value
                 for key, value in asdict(metrics).items()
-                if key in ("total_variation", "kl_reference_to_candidate", "max_abs_logit_delta", "mean_abs_logit_delta")
+                if key in (
+                    "max_abs_probability_delta", "mean_abs_probability_delta",
+                    "max_abs_logit_delta", "mean_abs_logit_delta",
+                    "total_variation", "kl_reference_to_candidate", "argmax_equal",
+                )
             },
         }
         row[name] = {
             "chunk": chunk,
-            "model_calls": results[name].metadata["model_calls"],
-            "latency_ms": latency_percentiles(latencies[name]),
-            "peak_memory": memories[name][-1],
+            "model_calls": metadata["model_calls"],
+            "latency_ms": stats,
+            "requests_per_s": 1000.0 / stats["mean"],
+            "candidates_per_s": len(request.candidates) * 1000.0 / stats["mean"],
+            "peak_memory_across_repeats": peaks[name],
+            "tokenizer_counts": {
+                "prefix_tokens": prefix_tokens,
+                "candidate_token_counts": candidate_counts,
+                "total_candidate_tokens": sum(candidate_counts),
+            },
+            "flat_logical_token_positions": flat_positions,
+            "shared_logical_token_positions": shared_positions if name.startswith("shared") else None,
+            "logical_reduction_ratio": (flat_positions / shared_positions) if name.startswith("shared") else None,
         }
+    if {"flat_chunked", "shared_chunked"} <= set(paths):
+        row["pair"] = {
+            "speedup_candidates_per_s": row["shared_chunked"]["candidates_per_s"]
+            / row["flat_chunked"]["candidates_per_s"]
+        }
+    row["performance_admissible"] = all(
+        entry["pass"] for key, entry in row.items() if key.endswith("_correctness")
+    )
     return row
 
 
@@ -272,144 +331,159 @@ def main() -> None:
     args = parser.parse_args()
 
     contract = load_contract()
+    cells = [
+        (prefix, k)
+        for prefix in contract["grids"]["prefix_units"]
+        for k in contract["grids"]["candidate_counts"]
+    ]
     plan = {
         "protocol_version": contract["protocol_version"],
         "execution_git_sha": _git_sha(),
-        "cells": [
-            (prefix, k)
-            for prefix in contract["grids"]["prefix_units"]
-            for k in contract["grids"]["candidate_counts"]
-        ],
+        "cell_count": len(cells),
         "anchor_cells": [tuple(cell) for cell in contract["anchor_suite"]["cells"]],
         "attribution": contract["attribution"],
+        "note": "GPU actions (preflight, measure) require an explicit subcommand and separate authorization",
     }
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     if args.action is None:
-        print(json.dumps({
-            "plan": {key: value for key, value in plan.items() if key != "cells"},
-            "cell_count": len(plan["cells"]),
-            "note": "GPU actions (preflight, measure) require an explicit subcommand and separate authorization",
-        }, indent=2))
+        print(json.dumps(plan, indent=2))
         return
     if not torch.cuda.is_available():
         raise SystemExit("GPU action requested but CUDA is unavailable")
 
     policy = AttentionPolicy(**contract["binding"]["attention_policy"])
     physical_bytes = int(torch.cuda.get_device_properties(0).total_memory)
-    provenance = {
-        "execution_git_sha": _git_sha(),
-        "contract_status": contract["status"],
-        "physical_vram_bytes": physical_bytes,
-        "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
-        "attention_policy": policy.as_record(),
-    }
+    binding = _binding_block(policy, physical_bytes)
     flat, shared = load_fp32_pair()
+    feasibility_path = OUTPUT_DIR / "feasibility.json"
+
+    if args.action == "preflight":
+        feasibility: dict[str, Any] = {"binding": binding, "cells": {}, "semantic": {}}
+        with attention_runtime(policy):
+            for cell in deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"]):
+                request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
+                record = probe_cell(flat, shared, request, contract, physical_bytes)
+                feasibility["cells"][f"p{cell[0]}-k{cell[1]}"] = record
+                print(
+                    json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}),
+                    flush=True,
+                )
+            for request in semantic_requests():
+                record = probe_cell(flat, shared, request, contract, physical_bytes)
+                feasibility["semantic"][request.request_id] = record
+        feasibility_path.write_text(json.dumps(feasibility, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"])}, indent=2))
+        return
+
+    # measure: re-verify the preflight binding before trusting any of it.
+    if not feasibility_path.is_file():
+        raise SystemExit("measure requires a completed preflight (feasibility.json) first")
+    feasibility = json.loads(feasibility_path.read_text(encoding="utf-8"))
+    mismatches = verify_feasibility_binding(feasibility, binding)
+    if mismatches:
+        raise SystemExit(f"stale or mismatched preflight evidence: {mismatches}; rerun preflight")
+
     with attention_runtime(policy):
-        cells = deterministic_cell_order(plan["cells"], contract["execution_order"]["cell_order_seed"])
-        requests = {cell: grid_request(cell[0], cell[1], contract["grids"]["candidate_units"]) for cell in cells}
-        if args.action == "preflight":
-            feasibility = {}
-            for cell in cells:
-                record = probe_cell(flat, shared, requests[cell], contract, physical_bytes)
-                feasibility[f"p{cell[0]}-k{cell[1]}"] = record
-                print(json.dumps({k: record[k] for k in ("request_id", "max_safe_flat", "max_safe_shared", "hardware_infeasible")}), flush=True)
-            (OUTPUT_DIR / "feasibility.json").write_text(json.dumps(feasibility, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            print(json.dumps({"output": str(OUTPUT_DIR / "feasibility.json"), "cells": len(feasibility)}, indent=2))
-            return
-        # measure
-        feasibility_path = OUTPUT_DIR / "feasibility.json"
-        if not feasibility_path.is_file():
-            raise SystemExit("measure requires a completed preflight (feasibility.json) first")
-        feasibility = json.loads(feasibility_path.read_text(encoding="utf-8"))
         infeasible = {
             (int(key[1:].split("-k")[0]), int(key.split("-k")[1]))
-            for key, record in feasibility.items()
+            for key, record in feasibility["cells"].items()
             if record["hardware_infeasible"]
         }
         anchors = resolve_anchor_set(plan["anchor_cells"], contract["grids"]["candidate_counts"], infeasible)
         (OUTPUT_DIR / "anchor_resolution.json").write_text(json.dumps(anchors, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tolerance = contract["correctness_gate"]["max_abs_probability_delta_lt"]
         cadence = contract["cadence"]
-        primary_rows = []
-        anchor_rows = []
-        attribution_rows = []
-        for cell in cells:
-            request = requests[cell]
+        suites: dict[str, list[dict[str, Any]]] = {"primary": [], "attribution": [], "anchor": [], "semantic": []}
+        semantic_records = feasibility["semantic"]
+        final_anchors = [tuple(a) for a in anchors["final_anchor_set"]]
+
+        for cell in deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"]):
             key = f"p{cell[0]}-k{cell[1]}"
-            record = feasibility[key]
+            record = feasibility["cells"][key]
             if record["hardware_infeasible"]:
                 continue
+            request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
+            membership = suite_membership(
+                cell, plan["anchor_cells"], contract["attribution"]["prefix_units"], contract["attribution"]["candidate_counts"]
+            )
             flat_chunk, shared_chunk = record["max_safe_flat"], record["max_safe_shared"]
-            is_anchor = tuple(cell) in [tuple(a) for a in anchors["final_anchor_set"]]
-            is_attribution = (
-                cell[0] in contract["attribution"]["prefix_units"]
-                and cell[1] in contract["attribution"]["candidate_counts"]
+            is_anchor = "anchor" in membership and tuple(cell) in final_anchors
+            pair_cadence = cadence["anchor"] if is_anchor else cadence["primary"]
+            pair_row = measure_cell(
+                flat, shared, request,
+                {
+                    "flat_chunked": (flat_chunked_score, flat, flat_chunk),
+                    "shared_chunked": (shared_chunked_score, shared, shared_chunk),
+                },
+                pair_cadence["warmups"], pair_cadence["repeats"], tolerance,
             )
+            pair_row["suites"] = membership
+            suites["primary"].append(pair_row)
             if is_anchor:
-                paths = {
-                    "flat_chunked": (flat_chunked_score, flat, flat_chunk),
-                    "shared_chunked": (shared_chunked_score, shared, shared_chunk),
-                }
-                anchor_rows.append(
-                    measure_cell(flat, shared, request, paths, cadence["anchor"]["warmups"], cadence["anchor"]["repeats"], tolerance)
-                )
-            elif is_attribution:
+                suites["anchor"].append(dict(pair_row))
+            if "attribution" in membership:
                 common = min(flat_chunk, shared_chunk, cell[1])
-                paths = {
-                    "flat_sequential": (flat_chunked_score, flat, 1),
-                    "flat_batched": (flat_chunked_score, flat, common),
-                    "shared_sequential": (shared_chunked_score, shared, 1),
-                    "shared_batched": (shared_chunked_score, shared, common),
-                }
-                attribution_rows.append(
-                    measure_cell(flat, shared, request, paths, cadence["primary"]["warmups"], cadence["primary"]["repeats"], tolerance)
+                attribution_row = measure_cell(
+                    flat, shared, request,
+                    {
+                        "flat_sequential": (flat_chunked_score, flat, 1),
+                        "flat_batched": (flat_chunked_score, flat, common),
+                        "shared_sequential": (shared_chunked_score, shared, 1),
+                        "shared_batched": (shared_chunked_score, shared, common),
+                    },
+                    cadence["primary"]["warmups"], cadence["primary"]["repeats"], tolerance,
                 )
-            else:
-                paths = {
-                    "flat_chunked": (flat_chunked_score, flat, flat_chunk),
-                    "shared_chunked": (shared_chunked_score, shared, shared_chunk),
-                }
-                primary_rows.append(
-                    measure_cell(flat, shared, request, paths, cadence["primary"]["warmups"], cadence["primary"]["repeats"], tolerance)
-                )
-        semantic_rows = []
+                attribution_row["common_chunk"] = common
+                suites["attribution"].append(attribution_row)
+
         for request in semantic_requests():
-            record = probe_cell(flat, shared, request, contract, physical_bytes)
+            record = semantic_records[request.request_id]
             if record["hardware_infeasible"]:
                 continue
-            paths = {
-                "flat_chunked": (flat_chunked_score, flat, record["max_safe_flat"]),
-                "shared_chunked": (shared_chunked_score, shared, record["max_safe_shared"]),
-            }
-            semantic_rows.append(
-                measure_cell(flat, shared, request, paths, cadence["semantic"]["warmups"], cadence["semantic"]["repeats"], tolerance)
+            suites["semantic"].append(
+                measure_cell(
+                    flat, shared, request,
+                    {
+                        "flat_chunked": (flat_chunked_score, flat, record["max_safe_flat"]),
+                        "shared_chunked": (shared_chunked_score, shared, record["max_safe_shared"]),
+                    },
+                    cadence["semantic"]["warmups"], cadence["semantic"]["repeats"], tolerance,
+                )
             )
-        for name, rows in (("primary", primary_rows), ("anchor", anchor_rows), ("attribution", attribution_rows), ("semantic", semantic_rows)):
+
+        for name, rows in suites.items():
             (OUTPUT_DIR / f"{name}.jsonl").write_text(
                 "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8"
             )
-        anchor_speedups = []
-        for row in anchor_rows:
-            flat_mean = row["flat_chunked"]["latency_ms"]["mean"]
-            shared_mean = row["shared_chunked"]["latency_ms"]["mean"]
-            k = row["candidate_count"]
-            anchor_speedups.append((k / shared_mean) / (k / flat_mean))
+        anchor_speedups = [row["pair"]["speedup_candidates_per_s"] for row in suites["anchor"] if row.get("pair")]
+        correctness_all_pass = all(
+            row.get("performance_admissible") for rows in suites.values() for row in rows
+        )
+        vram_acceptable = all(
+            entry["peak_memory_across_repeats"]["peak_reserved_bytes"] <= 0.95 * physical_bytes
+            for rows in suites.values()
+            for row in rows
+            for key, entry in row.items()
+            if isinstance(entry, dict) and "peak_memory_across_repeats" in entry
+        )
         summary = {
             "protocol_version": contract["protocol_version"],
             "anchors": anchors,
-            "a2": a2_performance_verdict(anchor_speedups, anchors["unique_anchor_count"]) if anchor_speedups else None,
+            "a2": a2_performance_verdict(
+                anchor_speedups, anchors["unique_anchor_count"],
+                correctness_all_pass=correctness_all_pass,
+                vram_acceptable=vram_acceptable,
+                measured_work_evidence=False,  # no independent measured-work proxy exists in this campaign
+                strong_threshold=2.0, conditional_threshold=1.5, minimum_anchors=4,
+            ) if anchor_speedups else None,
             "infeasible_cells": sorted(f"p{p}-k{k}" for p, k in infeasible),
-            "rows": {name: len(rows) for name, rows in (("primary", primary_rows), ("anchor", anchor_rows), ("attribution", attribution_rows), ("semantic", semantic_rows))},
-            "correctness_all_pass": all(
-                entry["pass"]
-                for rows in (primary_rows, anchor_rows, attribution_rows, semantic_rows)
-                for row in rows
-                for key, entry in row.items()
-                if key.endswith("_correctness")
-            ),
+            "correctness_all_pass": correctness_all_pass,
+            "vram_acceptable": vram_acceptable,
+            "rows": {name: len(rows) for name, rows in suites.items()},
+            "binding": binding,
+            "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
         }
         (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        (OUTPUT_DIR / "provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(summary, indent=2, sort_keys=True))
 
 
