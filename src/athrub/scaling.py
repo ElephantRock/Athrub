@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -401,3 +402,39 @@ def a2_performance_verdict(
         "gates": gates,
         "a2_performance_verdict": verdict,
     }
+
+
+def verdict_thresholds(contract: dict[str, Any]) -> dict[str, Any]:
+    """Derive the A2 band thresholds and anchor minimum from the frozen contract.
+
+    The contract stores the interpretation as text (">= 2.0x", "1.5x <= speedup
+    < 2.0x", "fewer than four unique feasible anchors"). The numbers are parsed
+    out of those strings so no code path carries independent constants; any
+    contract drift surfaces as a parse failure rather than a silent mismatch.
+    """
+
+    bands = contract["a2_interpretation"]["verdict_bands"]
+    strong_match = re.fullmatch(r">= ([0-9.]+)x", bands["strong"])
+    # The conditional band text carries a trailing qualification clause; match
+    # the numeric range at the start of the string.
+    conditional_match = re.match(r"([0-9.]+)x <= speedup < ([0-9.]+)x", bands["conditional"])
+    minimum_match = re.search(
+        r"fewer than ([a-z]+) unique feasible anchors", contract["a2_interpretation"]["anchor_minimum"]
+    )
+    if strong_match is None or conditional_match is None or minimum_match is None:
+        raise ValueError(
+            "cannot derive A2 thresholds from the frozen interpretation text: "
+            f"{bands['strong']!r} / {bands['conditional']!r} / {contract['a2_interpretation']['anchor_minimum']!r}"
+        )
+    number_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+    minimum_anchors = number_words.get(minimum_match.group(1))
+    if minimum_anchors is None:
+        raise ValueError(f"unparseable anchor minimum word: {minimum_match.group(1)!r}")
+    derived = {
+        "strong": float(strong_match.group(1)),
+        "conditional": float(conditional_match.group(1)),
+        "minimum_anchors": minimum_anchors,
+    }
+    if derived["conditional"] >= derived["strong"]:
+        raise ValueError(f"conditional band must sit below the strong band: {derived}")
+    return derived

@@ -2,12 +2,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-from tests.test_shared_context import (
-    CacheAwareAccumulatingModel,
-    FakeTokenizer,
-    make_head,
-    make_request,
-)
 
 from athrub.reference import FlatReferenceBackend
 from athrub.scaling import (
@@ -24,9 +18,21 @@ from athrub.scaling import (
     resolve_anchor_set,
     shared_chunked_score,
     suite_membership,
+    verdict_thresholds,
     verify_feasibility_binding,
 )
 from athrub.shared_context import SharedContextBackend
+
+# Sibling-module import: pytest's default prepend import mode puts tests/ on
+# sys.path (no __init__.py), so this resolves identically under `pytest` (CI)
+# and `python -m pytest` (local). The package-qualified `tests.` form only
+# works when the repo root is on sys.path, which bare pytest does not guarantee.
+from test_shared_context import (
+    CacheAwareAccumulatingModel,
+    FakeTokenizer,
+    make_head,
+    make_request,
+)
 
 
 def make_flat() -> FlatReferenceBackend:
@@ -281,26 +287,24 @@ def test_verdict_thresholds_derived_from_contract() -> None:
     import json as _json
     from pathlib import Path
 
-    from benchmarks.a1_fp32_scaling_run import _verdict_thresholds
-
     contract = _json.loads(Path("configs/a1_fp32_scaling.v0.1.json").read_text(encoding="utf-8"))
-    derived = _verdict_thresholds(contract)
+    derived = verdict_thresholds(contract)
     # Values parsed from the frozen interpretation text, not hard-coded.
     assert derived == {"strong": 2.0, "conditional": 1.5, "minimum_anchors": 4}
     # A drifted contract must fail derivation rather than silently pass.
     drifted = _json.loads(_json.dumps(contract))
     drifted["a2_interpretation"]["verdict_bands"]["strong"] = "at least twice as fast"
     try:
-        _verdict_thresholds(drifted)
-    except SystemExit:
+        verdict_thresholds(drifted)
+    except ValueError:
         pass
     else:
         raise AssertionError("drifted strong band must fail derivation")
     inverted = _json.loads(_json.dumps(contract))
     inverted["a2_interpretation"]["verdict_bands"]["conditional"] = "3.0x <= speedup < 4.0x"
     try:
-        _verdict_thresholds(inverted)
-    except SystemExit:
+        verdict_thresholds(inverted)
+    except ValueError:
         pass
     else:
         raise AssertionError("conditional above strong must fail derivation")
