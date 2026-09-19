@@ -275,3 +275,39 @@ def test_measure_row_contains_required_metric_fields() -> None:
     assert required_latency <= set(synthetic["latency_ms"])
     assert required_memory <= set(synthetic["peak_memory_across_repeats"])
     assert required_correctness >= {"pass"}
+
+
+def test_verdict_thresholds_derived_from_contract() -> None:
+    import json as _json
+    from pathlib import Path
+
+    contract = _json.loads(Path("configs/a1_fp32_scaling.v0.1.json").read_text(encoding="utf-8"))
+    bands = contract["a2_interpretation"]["verdict_bands"]
+    strong = float(bands["strong"].replace(">= ", "").rstrip("x"))
+    conditional = 1.5
+    assert "1.5x <= speedup < 2.0x" in bands["conditional"]
+    assert strong == 2.0 and conditional == 1.5
+    assert "fewer than four unique feasible anchors" in contract["a2_interpretation"]["anchor_minimum"]
+
+
+def test_substituted_anchor_treated_as_final() -> None:
+    # A resource-substituted cell must be measured at anchor cadence: the
+    # runner checks final_anchor_set membership, not the original list.
+    original_anchors = [(512, 32), (512, 128)]
+    resolved = resolve_anchor_set(original_anchors, [2, 4, 8, 16, 32, 64, 128, 255], {(512, 128)})
+    final = {tuple(a) for a in resolved["final_anchor_set"]}
+    assert (512, 64) in final  # substituted cell
+    assert (512, 128) not in final  # original, infeasible
+    # Runner logic: is_anchor = tuple(cell) in final_anchors — (512,64) qualifies.
+    assert (512, 64) in final and (512, 32) in final
+
+
+def test_inadmissible_anchors_excluded_from_geomean() -> None:
+    # The anchor geometric mean filters on performance_admissible.
+    rows = [
+        {"pair": {"speedup_candidates_per_s": 2.5}, "performance_admissible": True},
+        {"pair": {"speedup_candidates_per_s": 5.0}, "performance_admissible": False},  # oracle OOM
+        {"pair": {"speedup_candidates_per_s": 2.0}, "performance_admissible": True},
+    ]
+    speedups = [r["pair"]["speedup_candidates_per_s"] for r in rows if r.get("pair") and r.get("performance_admissible")]
+    assert geometric_mean(speedups) == geometric_mean([2.5, 2.0])

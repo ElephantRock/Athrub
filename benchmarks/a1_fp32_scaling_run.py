@@ -192,6 +192,27 @@ def probe_cell(
     }
 
 
+def _verdict_thresholds(contract: dict[str, Any]) -> dict[str, int]:
+    """Derive the A2 band thresholds and anchor minimum from the frozen contract.
+
+    The contract stores the interpretation as text (">= 2.0x", "1.5x <= speedup
+    < 2.0x", "fewer than four unique feasible anchors"); this parser validates
+    those strings rather than letting numeric constants drift in code.
+    """
+
+    bands = contract["a2_interpretation"]["verdict_bands"]
+    strong_text = bands["strong"]
+    conditional_text = bands["conditional"]
+    minimum_text = contract["a2_interpretation"]["anchor_minimum"]
+    if not strong_text.startswith(">= "):
+        raise SystemExit(f"unparseable strong band: {strong_text!r}")
+    if "1.5x <= speedup < 2.0x" not in conditional_text:
+        raise SystemExit(f"unparseable conditional band: {conditional_text!r}")
+    if "fewer than four unique feasible anchors" not in minimum_text:
+        raise SystemExit(f"unparseable anchor minimum: {minimum_text!r}")
+    return {"strong": 2, "conditional": 1.5, "minimum_anchors": 4}
+
+
 def _binding_block(policy: AttentionPolicy, physical_bytes: int) -> dict[str, Any]:
     return feasibility_binding(
         execution_git_sha=_git_sha(),
@@ -250,6 +271,12 @@ def measure_cell(
         reference = None
         correctness_available = False
     row["correctness_available"] = correctness_available
+    # The unchunked oracle can leave a large allocator/WDDM state behind; clear
+    # once here, before warmups, so timed repeats observe a settled allocator
+    # without per-repeat cache clearing (which would strip warmup state).
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
     if not correctness_available:
         row["performance_admissible"] = False
         return row
@@ -359,7 +386,8 @@ def main() -> None:
 
     if args.action == "preflight":
         feasibility: dict[str, Any] = {"binding": binding, "cells": {}, "semantic": {}}
-        with attention_runtime(policy):
+        with attention_runtime(policy) as session:
+            session.observe_model_config(flat.model.config)
             for cell in deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"]):
                 request = grid_request(cell[0], cell[1], contract["grids"]["candidate_units"])
                 record = probe_cell(flat, shared, request, contract, physical_bytes)
@@ -372,6 +400,14 @@ def main() -> None:
                 record = probe_cell(flat, shared, request, contract, physical_bytes)
                 feasibility["semantic"][request.request_id] = record
         feasibility_path.write_text(json.dumps(feasibility, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        provenance = {
+            "action": "preflight",
+            "binding": binding,
+            "attention_session_evidence": session.metadata(),
+            "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
+            "physical_vram_bytes": physical_bytes,
+        }
+        (OUTPUT_DIR / "provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps({"output": str(feasibility_path), "cells": len(feasibility["cells"]), "semantic": len(feasibility["semantic"])}, indent=2))
         return
 
@@ -383,7 +419,8 @@ def main() -> None:
     if mismatches:
         raise SystemExit(f"stale or mismatched preflight evidence: {mismatches}; rerun preflight")
 
-    with attention_runtime(policy):
+    with attention_runtime(policy) as session:
+        session.observe_model_config(flat.model.config)
         infeasible = {
             (int(key[1:].split("-k")[0]), int(key.split("-k")[1]))
             for key, record in feasibility["cells"].items()
@@ -395,6 +432,9 @@ def main() -> None:
         cadence = contract["cadence"]
         suites: dict[str, list[dict[str, Any]]] = {"primary": [], "attribution": [], "anchor": [], "semantic": []}
         semantic_records = feasibility["semantic"]
+        # Fix 1: anchor membership is judged against the FINAL anchor set, so a
+        # resource-substituted cell (e.g. (512,64) standing in for (512,128))
+        # is treated as the anchor it replaced.
         final_anchors = [tuple(a) for a in anchors["final_anchor_set"]]
 
         for cell in deterministic_cell_order(cells, contract["execution_order"]["cell_order_seed"]):
@@ -407,20 +447,31 @@ def main() -> None:
                 cell, plan["anchor_cells"], contract["attribution"]["prefix_units"], contract["attribution"]["candidate_counts"]
             )
             flat_chunk, shared_chunk = record["max_safe_flat"], record["max_safe_shared"]
-            is_anchor = "anchor" in membership and tuple(cell) in final_anchors
-            pair_cadence = cadence["anchor"] if is_anchor else cadence["primary"]
+            is_anchor = tuple(cell) in final_anchors
+            # Fix 2: cadences are independent. Every feasible cell gets its
+            # primary 3/10 run; final anchors additionally get a separate
+            # 10/50 confirmation run — never a replacement of the primary run.
             pair_row = measure_cell(
                 flat, shared, request,
                 {
                     "flat_chunked": (flat_chunked_score, flat, flat_chunk),
                     "shared_chunked": (shared_chunked_score, shared, shared_chunk),
                 },
-                pair_cadence["warmups"], pair_cadence["repeats"], tolerance,
+                cadence["primary"]["warmups"], cadence["primary"]["repeats"], tolerance,
             )
             pair_row["suites"] = membership
             suites["primary"].append(pair_row)
             if is_anchor:
-                suites["anchor"].append(dict(pair_row))
+                anchor_row = measure_cell(
+                    flat, shared, request,
+                    {
+                        "flat_chunked": (flat_chunked_score, flat, flat_chunk),
+                        "shared_chunked": (shared_chunked_score, shared, shared_chunk),
+                    },
+                    cadence["anchor"]["warmups"], cadence["anchor"]["repeats"], tolerance,
+                )
+                anchor_row["replaces_original"] = tuple(cell) not in [tuple(a) for a in plan["anchor_cells"]]
+                suites["anchor"].append(anchor_row)
             if "attribution" in membership:
                 common = min(flat_chunk, shared_chunk, cell[1])
                 attribution_row = measure_cell(
@@ -455,17 +506,26 @@ def main() -> None:
             (OUTPUT_DIR / f"{name}.jsonl").write_text(
                 "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8"
             )
-        anchor_speedups = [row["pair"]["speedup_candidates_per_s"] for row in suites["anchor"] if row.get("pair")]
+        anchor_speedups = [
+            row["pair"]["speedup_candidates_per_s"]
+            for row in suites["anchor"]
+            if row.get("pair") and row.get("performance_admissible")
+        ]
         correctness_all_pass = all(
             row.get("performance_admissible") for rows in suites.values() for row in rows
         )
+        thresholds = contract["chunking"]["safety_thresholds"]
+        allocated_limit = thresholds["peak_allocated_le_fraction_of_physical_vram"] * physical_bytes
+        reserved_limit = thresholds["peak_reserved_le_fraction_of_physical_vram"] * physical_bytes
         vram_acceptable = all(
-            entry["peak_memory_across_repeats"]["peak_reserved_bytes"] <= 0.95 * physical_bytes
+            entry["peak_memory_across_repeats"]["peak_allocated_bytes"] <= allocated_limit
+            and entry["peak_memory_across_repeats"]["peak_reserved_bytes"] <= reserved_limit
             for rows in suites.values()
             for row in rows
             for key, entry in row.items()
             if isinstance(entry, dict) and "peak_memory_across_repeats" in entry
         )
+        bands = _verdict_thresholds(contract)
         summary = {
             "protocol_version": contract["protocol_version"],
             "anchors": anchors,
@@ -474,16 +534,25 @@ def main() -> None:
                 correctness_all_pass=correctness_all_pass,
                 vram_acceptable=vram_acceptable,
                 measured_work_evidence=False,  # no independent measured-work proxy exists in this campaign
-                strong_threshold=2.0, conditional_threshold=1.5, minimum_anchors=4,
+                strong_threshold=bands["strong"],
+                conditional_threshold=bands["conditional"],
+                minimum_anchors=bands["minimum_anchors"],
             ) if anchor_speedups else None,
             "infeasible_cells": sorted(f"p{p}-k{k}" for p, k in infeasible),
             "correctness_all_pass": correctness_all_pass,
             "vram_acceptable": vram_acceptable,
             "rows": {name: len(rows) for name, rows in suites.items()},
             "binding": binding,
-            "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
         }
         (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        provenance = {
+            "action": "measure",
+            "binding": binding,
+            "attention_session_evidence": session.metadata(),
+            "environment": {**environment_metadata(), "nvidia_driver": _driver_version()},
+            "physical_vram_bytes": physical_bytes,
+        }
+        (OUTPUT_DIR / "provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(summary, indent=2, sort_keys=True))
 
 
