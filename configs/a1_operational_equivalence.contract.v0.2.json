@@ -1,0 +1,73 @@
+{
+  "contract_version": "0.2",
+  "status": "frozen-before-execution",
+  "issue": 11,
+  "semantic_oracle": "F = flat FP32",
+  "architecture_control": "G = shared-context FP32",
+  "bf16_baseline": "A = flat BF16, diagnostic only; A does not gate B",
+  "bf16_candidate": "B = shared-context BF16",
+  "mixed_prefix": "excluded: Issue #9 rejected it as a general solution",
+  "fp32_precondition": {
+    "comparison": "G_vs_F",
+    "max_abs_probability_delta_lt": 1e-05,
+    "argmax_exact": true,
+    "scope": "every valid holdout row"
+  },
+  "bf16_gates_per_row": {
+    "comparison": "B_vs_F",
+    "max_abs_probability_delta_le": 0.01,
+    "total_variation_le": 0.02
+  },
+  "oracle_ambiguity_radius": 0.02,
+  "decision_rule": {
+    "outside_ambiguity": "exact B_vs_F argmax required",
+    "inside_ambiguity": "B prediction must lie within F's ambiguity set (candidates whose F probability is within the oracle ambiguity radius of F's top-1)",
+    "rationale": "the radius is mathematically coupled to the per-candidate probability bound: top-1 ordering can reverse only within 2*epsilon_p"
+  },
+  "suite_verdict": "every valid row passes; no failure budget",
+  "reporting_requirements": [
+    "exact B_vs_F argmax agreement across all 42 rows, even where ambiguity-set membership permits a different winner",
+    "fraction of holdout rows inside and outside the oracle ambiguity region",
+    "oracle decision regret p_F(top1) - p_F(pred_B) for every permitted flip",
+    "KL divergence and centered logit deltas reported, not gated"
+  ],
+  "holdout": {
+    "rows": 42,
+    "synthetic": {
+      "rows": 18,
+      "prefix_units": [96, 224, 384],
+      "candidate_counts": [3, 6, 12],
+      "candidate_units": [8, 24]
+    },
+    "semantic": {
+      "rows": 24,
+      "generator": "athrub.a0_data",
+      "generator_version": "0.1",
+      "seed": 314159,
+      "records_per_family": 3,
+      "families": 8,
+      "candidate_min": 2,
+      "candidate_max": 8
+    },
+    "ordering": "18 synthetic rows (prefix ascending, then candidate count, then candidate units) followed by 24 semantic rows in generation order",
+    "manifest_path": "experiments/a1_operational_equivalence/holdout_manifest.v0.2.jsonl",
+    "manifest_sha256": "b7945ef0edc5b2e7d3c71d27bae0c46647dcce02ff612f5620d887bf81761632"
+  },
+  "binding": {
+    "reference_manifest_sha256": "fcd3cb6b3e56d747fa82b823353fa6eb893adface51ff2985190aa9f261834b5",
+    "frozen_at_commit": "5442809ba039bc9136eef1be7bc28ba274ff355d",
+    "attention_policy": {
+      "backend": "efficient_sdpa",
+      "gqa_strategy": "expand_kv_heads",
+      "q_to_kv_ratio": 2,
+      "fallback_allowed": false
+    }
+  },
+  "methodology": {
+    "no_posthoc_adjustment": "if B fails any valid holdout row, plain shared BF16 remains unsupported on this runtime; any new execution policy requires a newly predeclared contract and a new holdout",
+    "resource_preflight": "allowed before the 42-row run to establish shape feasibility; resource-only, may not inspect decision results or replace cases",
+    "infeasible_shape_rule": "stop and freeze a revised manifest before seeing acceptance metrics",
+    "request_grouping": "one DecisionRequest per score invocation, identical grouping across F, G, A, B",
+    "development_set_quarantine": "the nine Issue #9 oracle-relative rows are the development set; no threshold may be derived from them"
+  }
+}
