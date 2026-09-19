@@ -1,0 +1,127 @@
+{
+  "campaign": "A1 FP32 shared-context scaling (Issue #15)",
+  "protocol_version": "0.1",
+  "status": "frozen-before-gpu",
+  "precision": "fp32",
+  "bf16": "explicitly out of scope (Issue #11 disposition: plain shared BF16 UNSUPPORTED on this runtime)",
+  "binding": {
+    "reference_manifest_sha256": "fcd3cb6b3e56d747fa82b823353fa6eb893adface51ff2985190aa9f261834b5",
+    "frozen_at_commit": "b894981922e441b8e570f7be41d5ab79fec285d8",
+    "attention_policy": {
+      "backend": "efficient_sdpa",
+      "gqa_strategy": "expand_kv_heads",
+      "q_to_kv_ratio": 2,
+      "fallback_allowed": false
+    }
+  },
+  "grids": {
+    "candidate_counts": [2, 4, 8, 16, 32, 64, 128, 255],
+    "prefix_units": [128, 512, 1024, 2048, 4096, 8192],
+    "candidate_units": 16
+  },
+  "anchor_suite": {
+    "cells": [
+      [512, 32],
+      [512, 128],
+      [1024, 16],
+      [1024, 64],
+      [2048, 16],
+      [2048, 64]
+    ],
+    "substitution_rule": [
+      "If an anchor is resource-infeasible, substitute the largest lower K from the frozen K grid at the same prefix, chosen only from the resource preflight before timing.",
+      "Do not duplicate an already-selected anchor at that prefix; step down again.",
+      "If no unique lower-K substitute exists, mark that anchor unavailable.",
+      "If fewer than 4 unique anchors remain feasible, the campaign may report measurements but may not issue a strong/conditional A2 performance verdict."
+    ]
+  },
+  "attribution": {
+    "prefix_units": [128, 512, 1024],
+    "candidate_counts": [2, 8, 32],
+    "paths": ["flat-sequential", "flat-batched", "shared-sequential", "shared-batched"],
+    "sequential_definition": "flat-sequential and shared-sequential mean candidate chunk size = 1",
+    "batched_chunk_size": "min(max_safe_flat, max_safe_shared, K), established by the feasibility probe per cell"
+  },
+  "chunking": {
+    "feasibility_chunk_candidates": [1, 2, 4, 8, 16, 32, 64, 128],
+    "feasibility_candidates_clipped_to_K": true,
+    "full_K_probe_for_K_255": true,
+    "flat_chunk_semantics": "flat chunks recompute the complete prefix+candidate paths for each chunk",
+    "feasibility_discipline": {
+      "model_residency": "only one FP32 model pair resident per probe",
+      "before_each_probe": "clear allocator cache and reset peak memory statistics",
+      "chunk1_unsafe_rule": "if chunk = 1 is unsafe for either primary path, mark the cell hardware_infeasible; never substitute another prefix; applies equally at prefix 8192"
+    },
+    "safety_thresholds": {
+      "peak_allocated_le_fraction_of_physical_vram": 0.9,
+      "peak_reserved_le_fraction_of_physical_vram": 0.95,
+      "no_oom_or_error": true,
+      "no_observed_wddm_shared_memory_spill": true
+    },
+    "primary_comparison_chunk_policy": "each path may use its own largest safe chunk",
+    "shared_chunking_semantics": "prefix computed exactly once per request and reused across all continuation chunks; candidate logits restored to original candidate order; softmax applied once over the full K-candidate set"
+  },
+  "cadence": {
+    "primary": { "warmups": 3, "repeats": 10 },
+    "anchor": { "warmups": 10, "repeats": 50 },
+    "semantic": { "warmups": 5, "repeats": 20 }
+  },
+  "execution_order": {
+    "cell_order_seed": 271828,
+    "path_order": "alternate by measured repeat: flat -> shared, then shared -> flat, repeating"
+  },
+  "correctness_gate": {
+    "comparison": "candidate_path_vs_reference_flat",
+    "max_abs_probability_delta_lt": 1e-05,
+    "argmax_exact": true,
+    "scope": "every feasible measured cell; performance from a path is admissible only if it preserves FP32 equivalence on that cell"
+  },
+  "semantic_confirmation": {
+    "source": "the frozen Issue #11 holdout manifest",
+    "manifest_sha256": "b7945ef0edc5b2e7d3c71d27bae0c46647dcce02ff612f5620d887bf81761632",
+    "selection": "exactly the 24 records with metadata.suite == 'semantic' (they follow the 18 synthetic rows)"
+  },
+  "primary_comparison": "optimized/chunked flat vs chunked shared",
+  "metrics": {
+    "latency": ["p50", "p90", "p95", "p99", "mean"],
+    "throughput": ["requests_per_s", "candidates_per_s", "speedup"],
+    "token_work_accounting": [
+      "exact tokenizer counts",
+      "flat logical token positions",
+      "shared logical token positions",
+      "logical-reduction ratio"
+    ],
+    "timing": ["prefix timing where available", "continuation timing where available", "model timing where available"],
+    "memory_execution": ["peak allocated VRAM", "peak reserved VRAM", "chunk size", "model-call counts"],
+    "correctness": [
+      "max absolute logit delta",
+      "mean absolute logit delta",
+      "max absolute probability delta",
+      "mean absolute probability delta",
+      "total variation",
+      "KL divergence",
+      "argmax agreement"
+    ],
+    "provenance": [
+      "Athrub execution commit",
+      "frozen A0 binding/hashes",
+      "effective attention policy",
+      "environment",
+      "hardware",
+      "driver/CUDA",
+      "PyTorch"
+    ],
+    "interpretation_clause": "Logical token-position reduction is theoretical accounting, not measured FLOPs."
+  },
+  "a2_interpretation": {
+    "historical_phase1_gate": "correctness AND (>= 2x effective throughput OR >= 50% independently measured computational-work reduction) with acceptable VRAM",
+    "work_reduction_restriction": "The >=50% path may be invoked only if profiler/kernel evidence supplies an independent measured work proxy. Logical-position reduction alone does not qualify.",
+    "anchor_geomean": "geometric-mean candidates/s speedup across the final unique anchor set",
+    "verdict_bands": {
+      "strong": ">= 2.0x",
+      "conditional": "1.5x <= speedup < 2.0x, only if measured work reduction is clear",
+      "below": "< 1.5x: runtime bottleneck rather than architectural-speedup evidence"
+    },
+    "anchor_minimum": "fewer than four unique feasible anchors disables both the strong and conditional A2 performance verdicts, regardless of the geometric mean"
+  }
+}
