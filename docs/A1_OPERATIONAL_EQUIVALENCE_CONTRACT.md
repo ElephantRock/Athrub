@@ -59,9 +59,9 @@ logit deltas reported but not gated.
   long-prefix FP32 regime.
 - 24 semantic rows: three fresh generator-v0.1 records from each of the eight
   A0 workload families at fixed seed **314159** (distinct from the A0
-  training/validation seeds 1729/2718), candidate range 2–8 (generator
-  defaults; flagged for reviewer ratification — this is the one parameter the
-  Issue #11 proposal did not pin).
+  training/validation seeds 1729/2718), candidate range **2–8**. This range is
+  ratified for this holdout: the semantic half stays inside the A0-trained K
+  regime while the synthetic half supplies the out-of-training K=12 stress.
 - Fixed ordering: the 18 synthetic rows (prefix ascending, then candidate
   count, then candidate units) followed by the 24 semantic rows in generation
   order.
@@ -70,7 +70,8 @@ logit deltas reported but not gated.
   SHA-256 `b7945ef0edc5b2e7d3c71d27bae0c46647dcce02ff612f5620d887bf81761632`.
   Generator: `experiments/a1_operational_equivalence/generate_holdout_manifest.py`
   (includes guards asserting no overlap with development cells, unique request
-  ids, exactly 3 records per family, and seed distinctness).
+  ids, exactly 3 records per family, semantic K within 2–8, and seed
+  distinctness).
 
 ## Binding
 
