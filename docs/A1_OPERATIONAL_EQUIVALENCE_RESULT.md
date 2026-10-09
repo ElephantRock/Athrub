@@ -23,13 +23,22 @@ passing rows. No threshold was adjusted and no row was discarded.
 |---|---|
 | FP32 precondition | 42/42 pass |
 | B↔F max \|Δp\| gate (≤ 1e-2) | FAIL — 17 rows exceed; worst 3.794e-2 (`shape-p384-k3-c24`) |
-| B↔F TV gate (≤ 2e-2) | FAIL — 13 rows exceed; worst 4.002e-2 (`shape-p224-k6-c8`) |
+| B↔F TV gate (≤ 2e-2) | FAIL — 14 rows exceed; worst 4.002e-2 (`shape-p224-k6-c8`) |
 | Exact B↔F argmax | 41/42 (0.976) |
 | Argmax flips | 1: `shape-p96-k12-c24` |
 | Permitted flips (inside 2e-2 radius) | 0 |
 | Unpermitted flips (outside radius) | 1: `shape-p96-k12-c24`, oracle margin 2.205e-2, regret 2.205e-2 |
 | Rows inside ambiguity region | 4 (all synthetic K=12); outside 38 |
 | Failing rows | 15/18 synthetic (p96 6/6, p224 6/6, p384 3/6) + 2/24 semantic (`deadline-fit`, `closest-target`) |
+
+Erratum (2026-10-09): the TV-gate violation count was first published as 13;
+the correct count is 14. Recomputation from this run's own `rows.jsonl`
+(sha256 `b873253438192655563598a11debaa3a59fa1a5206e73b57b27312ef6b1a1018`,
+unchanged) finds 14 rows with `b_total_variation > 2e-2`, and the rows'
+recorded `b_tv_gate_pass` flags also mark exactly 14 rows; the row missed in
+the original count is `shape-p224-k6-c24` (TV 2.673e-2). The probability-gate
+count (17), both worst-case values, the argmax-flip accounting, and the
+verdict are unaffected.
 
 Failure pattern (recorded without causal claim): synthetic failures
 concentrate at small prefixes; the shared-BF16 distribution error relative to

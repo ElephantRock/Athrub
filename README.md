@@ -147,4 +147,8 @@ Key architecture documents include `docs/ROADMAP.md`, `docs/PHASE1.md`, `docs/A2
 
 ## Status
 
-The flat and shared-context execution prototypes exist and pass CPU contract/equivalence tests. The A0 milestone remains open until a trained reference substrate, tokenizer, scalar-head checkpoint, dataset manifest, and canonical benchmark artifact are frozen together.
+`Athrub A0 Reference v0.1` is frozen: trained substrate, tokenizer, scalar decision head, dataset manifest, canonical benchmark artifacts, and the public identity-neutral reference manifest are bound together by raw-byte SHA-256 digests, and the manifest validates against `schemas/reference_manifest.schema.json`.
+
+The A1 numerical-equivalence question is adjudicated on a frozen 42-row holdout: shared-context execution is operationally equivalent to the flat reference in FP32 (42/42 rows within 1e-5, exact argmax) and unsupported in plain BF16 on the reference runtime (17/42 rows violate the predeclared gates). See `docs/A1_OPERATIONAL_EQUIVALENCE_RESULT.md`.
+
+The A1 FP32 performance campaign (Issue #15) is frozen but its resource preflight is incomplete; A2 remains blocked until the A1 go gate passes with frozen numerical and performance evidence.
