@@ -135,12 +135,15 @@ def test_candidate_reordering_only_reorders_corresponding_scores() -> None:
 
     # Candidate row order changes CPU matmul tiling, so reversed scores can differ
     # by a few ulps across torch runtimes; the invariant under test is the ordering
-    # correspondence, not bit equality.
+    # correspondence, not bit equality. Observed 2026-10 on GitHub ubuntu runners
+    # (torch 2.14): 1-ulp logit deltas up to 7.6e-6 at |logit| ~ 64, so the logit
+    # bound must sit above ulp at that magnitude; ordering bugs misassign whole
+    # candidates and exceed it by orders of magnitude.
     assert reverse_result.logits == pytest.approx(
-        tuple(reversed(forward_result.logits)), abs=1e-6
+        tuple(reversed(forward_result.logits)), abs=1e-4
     )
     assert reverse_result.probabilities == pytest.approx(
-        tuple(reversed(forward_result.probabilities)), abs=1e-6
+        tuple(reversed(forward_result.probabilities)), abs=1e-5
     )
 
 
